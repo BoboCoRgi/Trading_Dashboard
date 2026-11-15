@@ -6,7 +6,7 @@ VWAP is computed from intraday bars only. Daily bars are refused.
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 from core.money import D, q8
@@ -105,6 +105,41 @@ def intraday_vwap(bars: list[MarketBar]) -> Decimal | None:
         typical = (D(bar.high) + D(bar.low) + D(bar.close)) / D(3)
         weighted += typical * D(bar.volume)
     return q8(weighted / volume)
+
+
+def vwap_series(bars: list[MarketBar]) -> list[Decimal | None]:
+    """Cumulative intraday VWAP, reset on each UTC date.
+
+    Daily bars are refused: every point is None. A bar missing high, low, or
+    volume stops the session series instead of being filled from the close.
+    """
+    if not bars or any(bar.interval == "1D" for bar in bars):
+        return [None] * len(bars)
+    results: list[Decimal | None] = []
+    current_day = None
+    weighted = D(0)
+    volume = D(0)
+    blocked = False
+    for bar in bars:
+        if bar.start.tzinfo is None:
+            results.append(None)
+            blocked = True
+            continue
+        day = bar.start.astimezone(timezone.utc).date()
+        if day != current_day:
+            current_day = day
+            weighted = D(0)
+            volume = D(0)
+            blocked = False
+        if blocked or bar.high is None or bar.low is None or bar.volume is None:
+            blocked = True
+            results.append(None)
+            continue
+        typical = (D(bar.high) + D(bar.low) + D(bar.close)) / D(3)
+        weighted += typical * D(bar.volume)
+        volume += D(bar.volume)
+        results.append(None if volume == 0 else q8(weighted / volume))
+    return results
 
 
 def simple_moving_average(closes: list[Decimal], window: int) -> list[Decimal | None]:

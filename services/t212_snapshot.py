@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from analytics.concentration import concentration
@@ -118,7 +118,14 @@ class LiveSnapshotReport:
         return "\n".join(lines)
 
 
-def create_live_snapshot(session: Session, client, settings, *, source: SnapshotSource) -> LiveSnapshotReport:
+def create_live_snapshot(
+    session: Session,
+    client,
+    settings,
+    *,
+    source: SnapshotSource,
+    update_existing: bool = False,
+) -> LiveSnapshotReport:
     """Fetch the current account, check it, and store one snapshot for this interval."""
     rehome_stock_splits(session)
     summary = client.get_account_summary()
@@ -162,6 +169,7 @@ def create_live_snapshot(session: Session, client, settings, *, source: Snapshot
         top1=conc.top1,
         top3=conc.top3,
         top5=conc.top5,
+        update_existing=update_existing,
     )
     rebuilt = _reconstruct_account(session, account.id)
     position_reconciliation = reconcile_positions(positions, rebuilt)
@@ -247,14 +255,29 @@ def _position_rows(session, account, positions: list, catalogue: dict) -> list[d
     return rows
 
 
-def _store_snapshot(session, *, account_id, moment, source, total, cash, invested, realised, rows, top1, top3, top5) -> bool:
+def _store_snapshot(
+    session,
+    *,
+    account_id,
+    moment,
+    source,
+    total,
+    cash,
+    invested,
+    realised,
+    rows,
+    top1,
+    top3,
+    top5,
+    update_existing: bool = False,
+) -> bool:
     existing = session.scalar(
         select(PortfolioSnapshot).where(
             PortfolioSnapshot.data_origin == DataOrigin.LIVE,
             PortfolioSnapshot.snapshot_time == moment,
         )
     )
-    if existing is not None:
+    if existing is not None and not update_existing:
         return False
     history = session.scalars(
         select(PortfolioSnapshot.total_portfolio_value_gbp)
@@ -267,30 +290,46 @@ def _store_snapshot(session, *, account_id, moment, source, total, cash, investe
     pnl_pct = None
     if history:
         pnl, pnl_pct = daily_pnl(total, D(history[-1]))
+    values = {
+        "total_portfolio_value_gbp": q8(total),
+        "cash_gbp": q8(cash),
+        "invested_value_gbp": q8(invested),
+        "daily_pnl_gbp": None if pnl is None else q8(pnl),
+        "daily_pnl_pct": None if pnl_pct is None else q8(pnl_pct),
+        "ath_portfolio_value_gbp": q8(drawdown.ath),
+        "drawdown_from_ath": q8(drawdown.current),
+        "max_drawdown_to_date": q8(drawdown.maximum),
+        "top1_concentration": q8(top1),
+        "top3_concentration": q8(top3),
+        "top5_concentration": q8(top5),
+        "realised_pnl_gbp": None if realised is None else q8(realised),
+        "source": source,
+    }
+    if existing is not None:
+        for key, value in values.items():
+            setattr(existing, key, value)
+        session.flush()
+        session.execute(delete(PositionSnapshot).where(PositionSnapshot.portfolio_snapshot_id == existing.id))
+        session.flush()
+        _insert_positions(session, existing.id, account_id, rows)
+        return True
     snapshot = PortfolioSnapshot(
         snapshot_time=moment,
-        total_portfolio_value_gbp=q8(total),
-        cash_gbp=q8(cash),
-        invested_value_gbp=q8(invested),
-        daily_pnl_gbp=None if pnl is None else q8(pnl),
-        daily_pnl_pct=None if pnl_pct is None else q8(pnl_pct),
-        ath_portfolio_value_gbp=q8(drawdown.ath),
-        drawdown_from_ath=q8(drawdown.current),
-        max_drawdown_to_date=q8(drawdown.maximum),
-        top1_concentration=q8(top1),
-        top3_concentration=q8(top3),
-        top5_concentration=q8(top5),
-        realised_pnl_gbp=None if realised is None else q8(realised),
         risk_score=None,
-        source=source,
         data_origin=DataOrigin.LIVE,
+        **values,
     )
     session.add(snapshot)
     session.flush()
+    _insert_positions(session, snapshot.id, account_id, rows)
+    return True
+
+
+def _insert_positions(session, snapshot_id, account_id, rows) -> None:
     for row in rows:
         session.add(
             PositionSnapshot(
-                portfolio_snapshot_id=snapshot.id,
+                portfolio_snapshot_id=snapshot_id,
                 account_id=account_id,
                 instrument_id=row["instrument_id"],
                 quantity=row["quantity"],
@@ -310,7 +349,6 @@ def _store_snapshot(session, *, account_id, moment, source, total, cash, investe
             )
         )
     session.flush()
-    return True
 
 
 def _catalogue(client) -> dict:

@@ -14,8 +14,10 @@ from scripts.dashboard_launch import (
     StartupFailure,
     find_first_existing,
     format_failure,
+    is_refresh_worker,
     is_this_dashboard,
     mock_plan,
+    refresh_worker_pids,
     run_startup,
     scrub,
     stop_dashboard,
@@ -48,6 +50,8 @@ def _ctx(**overrides) -> tuple[LaunchContext, dict]:
         "browser": [],
         "desktop": 0,
         "terminated": [],
+        "worker": 0,
+        "worker_processes": [],
         "health": "healthy",
         "engine": True,
         "mode": "live",
@@ -77,6 +81,8 @@ def _ctx(**overrides) -> tuple[LaunchContext, dict]:
         open_browser=state["browser"].append,
         sync_broker=lambda: state.__setitem__("sync", state["sync"] + 1) or "PASS",
         create_snapshot=lambda: state.__setitem__("snapshot", state["snapshot"] + 1) or True,
+        start_worker=lambda: state.__setitem__("worker", state["worker"] + 1),
+        workers=lambda: list(state["worker_processes"]),
         prepare_mock=lambda: state.__setitem__("mock", state["mock"] + 1),
         sleep=clock.sleep,
         now=clock.now,
@@ -90,15 +96,15 @@ def _ctx(**overrides) -> tuple[LaunchContext, dict]:
     return ctx, state
 
 
-def test_live_startup_syncs_and_never_seeds():
+def test_live_startup_starts_the_refresh_worker_and_never_seeds():
     ctx, state = _ctx()
     assert run_startup(ctx) == 0
-    assert state["sync"] == 1
-    assert state["snapshot"] == 1
+    assert state["worker"] == 1
+    assert state["sync"] == 0
+    assert state["snapshot"] == 0
     assert state["mock"] == 0
     assert state.get("seeded", 0) == 0
-    assert any(line == "[OK] Trading 212 sync" for line in ctx.lines)
-    assert any("Position reconciliation: PASS" in line for line in ctx.lines)
+    assert any(line == "[OK] Background refresh running" for line in ctx.lines)
     assert not any("scripts.seed" in " ".join(command) for command in state["commands"])
 
 
@@ -109,6 +115,7 @@ def test_mock_startup_uses_mock_path_and_skips_broker_sync():
     assert state["mock"] == 1
     assert state["sync"] == 0
     assert state["snapshot"] == 0
+    assert state["worker"] == 0
     assert state.get("seeded", 0) == 0
 
 
@@ -180,6 +187,30 @@ def test_unrelated_port_owner_is_left_alone():
     assert state["terminated"] == []
 
 
+def test_live_startup_reuses_a_running_refresh_worker():
+    ctx, state = _ctx()
+    state["worker_processes"] = [
+        {"pid": 3, "command": rf"{ROOT}\.venv\Scripts\python.exe -m scripts.run_t212_refresh_worker"}
+    ]
+    assert run_startup(ctx) == 0
+    assert state["worker"] == 0
+    assert any(line == "[OK] Background refresh running" for line in ctx.lines)
+
+
+def test_stop_terminates_dashboard_and_refresh_worker_only():
+    ctx, state = _ctx()
+    processes = [
+        {"pid": 5, "command": rf"{ROOT}\.venv\Scripts\python.exe -m streamlit run {ROOT}\app\dashboard\streamlit_app.py"},
+        {"pid": 6, "command": rf"{ROOT}\.venv\Scripts\python.exe -m scripts.run_t212_refresh_worker"},
+        {"pid": 9, "command": r"C:\other\python.exe -m scripts.run_t212_refresh_worker"},
+    ]
+    ctx.terminate = state["terminated"].append
+    stop_dashboard(ctx, processes)
+    assert state["terminated"] == [5, 6]
+    assert any(line == "[OK] Background refresh stopped" for line in ctx.lines)
+    assert state["commands"][-1][1:] == ["compose", "stop"]
+
+
 def test_stop_terminates_only_this_dashboard():
     ctx, state = _ctx()
     processes = [
@@ -203,6 +234,14 @@ def test_dashboard_identity_requires_this_project_path():
     command = rf"{ROOT}\.venv\Scripts\python.exe -m streamlit run app/dashboard/streamlit_app.py"
     assert is_this_dashboard(command, ROOT)
     assert not is_this_dashboard(r"C:\other\python.exe -m streamlit run app/dashboard/streamlit_app.py", ROOT)
+    worker = rf"{ROOT}\.venv\Scripts\python.exe -m scripts.run_t212_refresh_worker"
+    assert is_refresh_worker(worker, ROOT)
+    assert not is_refresh_worker(r"C:\other\python.exe -m scripts.run_t212_refresh_worker", ROOT)
+    assert refresh_worker_pids(
+        [{"pid": 6, "command": worker}, {"pid": 8, "command": ""}],
+        ROOT,
+        "8",
+    ) == [6, 8]
 
 
 def test_live_database_message_does_not_mention_seed():
@@ -219,12 +258,21 @@ def test_status_markup_has_no_secret_material():
             "database": "Connected",
             "broker": "Connected",
             "last_sync": None,
+            "last_refresh": None,
+            "next_refresh": None,
+            "worker": "Running",
             "snapshot": None,
             "reconciliation": "PASS",
         }
     )
     assert "LIVE · Trading 212" in markup
+    assert "Dashboard: Running" in markup
     assert "Database: Connected" in markup
+    assert "Trading 212: Connected" in markup
+    assert "Background refresh: Running" in markup
+    assert "Last successful T212 refresh:" not in markup
+    assert "Next automatic refresh:" not in markup
+    assert "Latest portfolio snapshot:" not in markup
     assert "Position reconciliation: PASS" in markup
     assert "api" not in markup.lower()
     assert SECRET not in markup

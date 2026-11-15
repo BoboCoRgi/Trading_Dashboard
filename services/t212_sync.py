@@ -113,12 +113,19 @@ class SyncReport:
         return "\n".join(lines)
 
 
-def sync_trading212_history(session: Session, client, positions: list[dict] | None = None) -> SyncReport:
+def sync_trading212_history(
+    session: Session,
+    client,
+    positions: list[dict] | None = None,
+    *,
+    incremental: bool = False,
+) -> SyncReport:
     report = SyncReport()
     catalogue = client.get_instruments()
-    orders = client.get_historical_orders()
-    transactions = client.get_transactions()
-    dividends = client.get_dividends()
+    known = _known_live_event_ids(session) if incremental else set()
+    orders = _history_page(client, "orders", known)
+    transactions = _history_page(client, "transactions", known)
+    dividends = _history_page(client, "dividends", known)
     report.instruments_fetched = len(catalogue)
     report.orders_fetched = len(orders)
     report.transactions_fetched = len(transactions)
@@ -151,6 +158,26 @@ def sync_trading212_history(session: Session, client, positions: list[dict] | No
         normalisation_errors=report.normalisation_errors,
     )
     return report
+
+
+def _history_page(client, kind: str, known: set[str]):
+    """Full history when nothing is stored yet. Otherwise stop at the first known id."""
+    identify = {"orders": order_event_id, "transactions": transaction_event_id, "dividends": dividend_event_id}[kind]
+    fetch_name = {"orders": "get_historical_orders", "transactions": "get_transactions", "dividends": "get_dividends"}[kind]
+    fetch = getattr(client, fetch_name)
+    if not known:
+        return fetch()
+    return fetch(known_ids=known, identify=identify)
+
+
+def _known_live_event_ids(session: Session) -> set[str]:
+    rows = session.scalars(
+        select(RawBrokerEvent.broker_event_id).where(
+            RawBrokerEvent.broker == Broker.TRADING212,
+            RawBrokerEvent.data_origin == DataOrigin.LIVE,
+        )
+    ).all()
+    return {row for row in rows if row}
 
 
 def _account_currency(client) -> str:

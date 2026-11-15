@@ -86,7 +86,6 @@ def test_missing_market_data_is_unavailable():
 
 
 def test_today_page_drops_snapshot_sections():
-    from app.dashboard import event_panel
     from app.dashboard.views import today
 
     source = inspect.getsource(today.render)
@@ -95,9 +94,11 @@ def test_today_page_drops_snapshot_sections():
     assert "two snapshots" not in source
     assert "portfolio_value_chart" not in source
     assert "drawdown_chart" not in source
+    assert "Market events" not in source
     assert "What's driving my P&L today?" in source
-    panel = inspect.getsource(event_panel.render_event_dive)
-    assert "two snapshots" not in panel
+    assert "allocation_chart" not in source
+    assert "Where is the weight?" not in source
+    assert source.index("attention_block") < source.index("What's driving my P&L today?")
 
 
 def test_snapshot_storage_and_existing_analytics_remain():

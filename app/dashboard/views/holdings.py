@@ -1,12 +1,13 @@
 """Holdings analysis. Positions come from the selected snapshot, not a broker call."""
 
-from decimal import Decimal
+import html
+from decimal import Decimal, ROUND_HALF_UP
 
 import streamlit as st
 
 from app.dashboard.charts import allocation_chart, pnl_contribution_chart, price_volume_chart, relative_performance_chart, show_chart
-from app.dashboard.components import empty_state, page_header, portfolio_unavailable, section_header, styled_table
-from app.dashboard.present import format_gbp
+from app.dashboard.components import empty_state, page_header, portfolio_unavailable, section_header, show, styled_table
+from app.dashboard.present import format_gbp, tidy_quantity, tone_for_signed, two_places
 from app.dashboard.system_status import database_unavailable_message
 from core.config import get_settings
 from db.session import session_scope
@@ -39,8 +40,8 @@ def render() -> None:
     page_header(
         "Holdings",
         "Current positions from the selected snapshot. Same symbol is combined by quantity.",
-        meta=f"Snapshot {report['source'].get('snapshot_clock') or ''}",
         source=report.get("source"),
+        compact_source=True,
     )
     _book(report)
     if not report["combined"]:
@@ -58,20 +59,20 @@ def render() -> None:
 
 
 def _book(report: dict) -> None:
-    mode = st.segmented_control("View", ["Combined", "By account"], default="Combined", key="holdings-book")
+    mode = st.segmented_control(
+        "Book",
+        ["Combined", "By account"],
+        default="Combined",
+        key="holdings-book",
+        label_visibility="collapsed",
+    )
     if mode == "By account":
-        rows = [_lot_row(lot) for lot in report["lots"]]
-        rows.sort(key=lambda row: row[0])
+        lots = sorted(report["lots"], key=lambda lot: (lot.symbol, lot.account_label))
+        rows = [_lot_row(lot) for lot in lots]
     else:
         rows = [_combined_row(row) for row in report["combined"]]
-    section_header(
-        "Positions",
-        "Average cost is weighted by quantity. GBP cost and the broker's native average are labeled separately.",
-    )
-    styled_table(
-        ["Ticker", "Account", "Quantity", "Average cost", "Price", "Value", "P&L", "Weight", "Day"],
-        rows,
-    )
+    section_header("Positions", "Average cost is the broker average in the trading currency.")
+    _positions_table(rows)
     settings = get_settings()
     weights = [
         {
@@ -186,8 +187,8 @@ def _detail(detail: dict) -> None:
                 [
                     trade["time"].isoformat(),
                     trade["action"],
-                    _qty(trade["quantity"]),
-                    f"{trade['price']} {trade['currency']}",
+                    tidy_quantity(trade["quantity"]),
+                    f"{two_places(trade['price'])} {trade['currency']}",
                     f"{trade['broker']} · {trade['account']}",
                     _gbp(trade["value_gbp"]),
                     "—" if trade["decision"] is None else trade["decision"],
@@ -231,21 +232,21 @@ def _cost_notes(position, chart_currency: str | None) -> None:
         st.caption(position.gbp_cost.method)
     elif chart_currency and chart_currency != "GBP":
         st.caption(
-            f"GBP average cost {position.gbp_cost.value} is not drawn on this {chart_currency} chart. {position.gbp_cost.method}"
+            f"GBP average cost {two_places(position.gbp_cost.value)} is not drawn on this {chart_currency} chart. {position.gbp_cost.method}"
         )
     else:
-        st.caption(f"GBP average cost {position.gbp_cost.value}. {position.gbp_cost.method}")
+        st.caption(f"GBP average cost {two_places(position.gbp_cost.value)}. {position.gbp_cost.method}")
     if chart_currency:
         for line in chart_cost_lines(position, chart_currency):
-            st.caption(f"{line['name']}: {line['price']} {chart_currency}. {line['method']}")
+            st.caption(f"{line['name']}: {two_places(line['price'])} {chart_currency}. {line['method']}")
     elif position.native_cost.value is not None:
-        st.caption(f"Broker average {position.native_cost.value} {position.native_cost.currency}. {position.native_cost.method}")
+        st.caption(f"Broker average {two_places(position.native_cost.value)} {position.native_cost.currency}. {position.native_cost.method}")
     elif position.native_cost.method:
         st.caption(position.native_cost.method)
 
 
 def _stat(title: str, payload: dict) -> None:
-    value = "Unavailable" if payload["value"] is None else f"{payload['value']}x"
+    value = "Unavailable" if payload["value"] is None else f"{two_places(payload['value'])}x"
     section_header(title, payload["note"])
     st.markdown(f"**{value}**")
 
@@ -273,7 +274,7 @@ def _trade_point(trade: dict) -> dict:
         "price": float(trade["price"]),
         "hover": (
             f"{trade['action']}<br>{trade['time'].isoformat()}<br>"
-            f"Quantity {trade['quantity']}<br>Fill {trade['price']} {trade['currency']}<br>"
+            f"Quantity {tidy_quantity(trade['quantity'])}<br>Fill {two_places(trade['price'])} {trade['currency']}<br>"
             f"{trade['broker']} · {trade['account']}<br>GBP value {format_gbp(float(trade['value_gbp']))}<br>{decision}"
         ),
     }
@@ -287,59 +288,120 @@ def _in_span(trade: dict, bars) -> bool:
     return start <= trade["time"] <= end
 
 
+def _positions_table(rows: list[list[str]]) -> None:
+    headers = ["Ticker", "Quantity", "Avg cost", "Price", "Value", "P&L", "Weight"]
+    if not rows:
+        empty_state("Nothing to compare.")
+        return
+    head = "".join(f"<th>{_esc(header)}</th>" for header in headers)
+    body = []
+    for row in rows:
+        cells = [f'<td class="ticker">{row[0]}</td>']
+        cells.extend(f"<td>{cell}</td>" for cell in row[1:])
+        body.append(f"<tr>{''.join(cells)}</tr>")
+    show(
+        f'<div style="overflow-x:auto"><table class="mc-table"><thead><tr>{head}</tr></thead>'
+        f"<tbody>{''.join(body)}</tbody></table></div>"
+    )
+
+
 def _combined_row(row) -> list[str]:
-    account = "Combined · " + ", ".join(f"{lot.broker_label} { _qty(lot.quantity) }" for lot in row.lots)
-    cost = _cost(row.gbp_cost.value, "GBP")
-    if row.native_cost.value is not None:
-        cost = f"{cost} · broker {_cost(row.native_cost.value, row.native_cost.currency)}"
     return [
-        row.symbol,
-        account,
-        _qty(row.quantity),
-        cost,
-        _cost(row.price, row.price_currency),
-        _gbp(row.market_value_gbp),
-        f"{_gbp(row.unrealised_gbp)} ({_pct(row.unrealised_pct)})",
-        _pct(row.weight),
-        f"{_pct(row.daily_change_pct)} · {_gbp(row.daily_pnl_gbp)}",
+        _esc(row.symbol),
+        _esc(tidy_quantity(row.quantity)),
+        _cost_cell(row.native_cost.value, row.native_cost.currency, row.gbp_cost.value),
+        _esc(_price(row.price, row.price_currency)),
+        _esc(_gbp(row.market_value_gbp)),
+        _pnl_cell(row.unrealised_gbp, row.unrealised_pct),
+        _esc(_weight(row.weight)),
     ]
 
 
 def _lot_row(lot) -> list[str]:
-    cost = _cost(lot.average_cost_gbp, "GBP")
-    if lot.broker_average is not None:
-        cost = f"{cost} · broker {_cost(lot.broker_average, lot.broker_average_currency or '')}"
+    account = lot.broker_label
+    if lot.account_label and lot.account_label != lot.broker_label:
+        account = f"{lot.broker_label} · {lot.account_label}"
     return [
-        lot.symbol,
-        f"{lot.broker_label} · {lot.account_label}",
-        _qty(lot.quantity),
-        cost,
-        _cost(lot.price, lot.price_currency),
-        _gbp(lot.market_value_gbp),
-        f"{_gbp(lot.unrealised_gbp)} ({_pct(lot.unrealised_pct)})",
-        _pct(lot.weight),
-        f"{_pct(lot.daily_change_pct)} · {_gbp(lot.daily_pnl_gbp)}",
+        f'{_esc(lot.symbol)}<div class="cell-sub">{_esc(account)}</div>',
+        _esc(tidy_quantity(lot.quantity)),
+        _cost_cell(lot.broker_average, lot.broker_average_currency or "", lot.average_cost_gbp),
+        _esc(_price(lot.price, lot.price_currency)),
+        _esc(_gbp(lot.market_value_gbp)),
+        _pnl_cell(lot.unrealised_gbp, lot.unrealised_pct),
+        _esc(_weight(lot.weight)),
     ]
+
+
+def _cost_cell(native: Decimal | None, currency: str, gbp: Decimal | None) -> str:
+    if native is None:
+        return _esc(_gbp(gbp))
+    primary = _price(native, currency)
+    if gbp is None or currency == "GBP":
+        return _esc(primary)
+    return _stack(primary, _gbp(gbp))
+
+
+def _pnl_cell(amount: Decimal | None, percent: Decimal | None) -> str:
+    main = _signed_gbp(amount)
+    secondary = _signed_pct(percent)
+    tone = tone_for_signed(main)
+    if secondary == "—":
+        return _stack(main, tone=tone)
+    return _stack(main, secondary, tone=tone)
+
+
+def _stack(primary: str, secondary: str | None = None, tone: str = "") -> str:
+    css = f" {tone}" if tone else ""
+    sub = f'<div class="cell-sub{css}">{_esc(secondary)}</div>' if secondary else ""
+    return f'<div class="cell-main{css}">{_esc(primary)}</div>{sub}'
 
 
 def _gbp(value: Decimal | None) -> str:
     if value is None:
         return "—"
-    return format_gbp(float(value), decimals=2)
+    return format_gbp(float(_money(value)), decimals=2)
 
 
-def _pct(value: Decimal | None) -> str:
+def _signed_gbp(value: Decimal | None) -> str:
+    text = _gbp(value)
+    if value is not None and value > 0:
+        return f"+{text}"
+    return text
+
+
+def _weight(value: Decimal | None) -> str:
+    return _percent(value, signed=False)
+
+
+def _signed_pct(value: Decimal | None) -> str:
+    return _percent(value, signed=True)
+
+
+def _percent(value: Decimal | None, *, signed: bool) -> str:
     if value is None:
         return "—"
-    return f"{(value * Decimal('100')).quantize(Decimal('0.01'))}%"
+    percent = (value * Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if value != 0 and percent == 0:
+        return "<0.01%" if value > 0 else ">-0.01%"
+    if signed and percent > 0:
+        return f"+{percent}%"
+    return f"{percent}%"
 
 
-def _qty(value: Decimal) -> str:
-    text = format(value, "f").rstrip("0").rstrip(".")
-    return text or "0"
-
-
-def _cost(value: Decimal | None, currency: str) -> str:
+def _price(value: Decimal | None, currency: str) -> str:
     if value is None:
         return "—"
-    return f"{value} {currency}".strip()
+    shown = two_places(value)
+    if currency == "USD":
+        return f"${shown}"
+    if currency == "GBP":
+        return f"£{shown}"
+    return f"{shown} {currency}".strip()
+
+
+def _money(value: Decimal) -> Decimal:
+    return Decimal(value).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+
+def _esc(value: object) -> str:
+    return html.escape("" if value is None else str(value))

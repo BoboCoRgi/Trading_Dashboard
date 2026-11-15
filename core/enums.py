@@ -38,6 +38,8 @@ class DecisionStatus(str, Enum):
 
 class ThesisStatus(str, Enum):
     ACTIVE = "ACTIVE"
+    WATCH = "WATCH"
+    BROKEN = "BROKEN"
     WEAKENED = "WEAKENED"
     INVALIDATED = "INVALIDATED"
     CLOSED = "CLOSED"
@@ -124,6 +126,9 @@ class OutcomeStatus(str, Enum):
 
 class WatchlistStatus(str, Enum):
     ACTIVE = "ACTIVE"
+    WATCHING = "WATCHING"
+    PASS = "PASS"
+    RESEARCH = "RESEARCH"
     ARCHIVED = "ARCHIVED"
 
 

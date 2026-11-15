@@ -6,6 +6,8 @@ write to the database.
 
 import logging
 import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -46,6 +48,15 @@ class Trading212TransientError(Trading212Error):
     """A 429 or 5xx response that persisted after limited retries."""
 
 
+@dataclass
+class RateLimitInfo:
+    """Latest Trading 212 rate-limit headers. Missing headers stay None."""
+
+    limit: int | None = None
+    remaining: int | None = None
+    reset_at: datetime | None = None
+
+
 class Trading212Client:
     """HTTP Basic client for the Trading 212 public API."""
 
@@ -61,6 +72,7 @@ class Trading212Client:
         self._transport = transport
         self._sleeper = sleeper
         self._history_interval = history_interval
+        self.rate_limit = RateLimitInfo()
 
     def get_account_summary(self) -> dict[str, Any]:
         payload = self._get("/equity/account/summary")
@@ -74,14 +86,32 @@ class Trading212Client:
             raise Trading212HTTPError("Positions response was not a list")
         return payload
 
-    def get_historical_orders(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        return self._paginate(f"/equity/history/orders?limit={limit}")
+    def get_historical_orders(
+        self,
+        *,
+        limit: int = 50,
+        known_ids: set[str] | None = None,
+        identify: Callable[[dict[str, Any]], str] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._paginate(f"/equity/history/orders?limit={limit}", known_ids=known_ids, identify=identify)
 
-    def get_transactions(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        return self._paginate(f"/equity/history/transactions?limit={limit}")
+    def get_transactions(
+        self,
+        *,
+        limit: int = 50,
+        known_ids: set[str] | None = None,
+        identify: Callable[[dict[str, Any]], str] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._paginate(f"/equity/history/transactions?limit={limit}", known_ids=known_ids, identify=identify)
 
-    def get_dividends(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        return self._paginate(f"/equity/history/dividends?limit={limit}")
+    def get_dividends(
+        self,
+        *,
+        limit: int = 50,
+        known_ids: set[str] | None = None,
+        identify: Callable[[dict[str, Any]], str] | None = None,
+    ) -> list[dict[str, Any]]:
+        return self._paginate(f"/equity/history/dividends?limit={limit}", known_ids=known_ids, identify=identify)
 
     def get_instruments(self) -> list[dict[str, Any]]:
         payload = self._get("/equity/metadata/instruments")
@@ -93,10 +123,17 @@ class Trading212Client:
             return payload["items"]
         raise Trading212HTTPError("Instrument catalogue was not a list")
 
-    def _paginate(self, path: str) -> list[dict[str, Any]]:
+    def _paginate(
+        self,
+        path: str,
+        *,
+        known_ids: set[str] | None = None,
+        identify: Callable[[dict[str, Any]], str] | None = None,
+    ) -> list[dict[str, Any]]:
         collected: list[dict[str, Any]] = []
         seen: set[str] = set()
         current = path
+        stop_early = bool(known_ids) and identify is not None
         for page in range(1, _MAX_PAGES + 1):
             if current in seen:
                 raise Trading212HTTPError("Pagination repeated a page")
@@ -108,10 +145,16 @@ class Trading212Client:
                 raise Trading212HTTPError("Historical page had no items list")
             batch = payload["items"]
             logger.info("Trading 212 page %s records %s", page, len(batch))
-            collected.extend(batch)
             nxt = payload.get("nextPagePath")
-            if not nxt:
-                return collected
+            if stop_early:
+                fresh, reached_known = take_until_known(batch, known_ids or set(), identify)
+                collected.extend(fresh)
+                if reached_known or not nxt:
+                    return collected
+            else:
+                collected.extend(batch)
+                if not nxt:
+                    return collected
             if not isinstance(nxt, str) or not nxt.startswith("/") or nxt.startswith("//"):
                 raise Trading212HTTPError("Malformed next page")
             current = nxt
@@ -156,6 +199,7 @@ class Trading212Client:
                     self._retry_or_raise(attempt, path, "could not connect", exc)
                     continue
                 status = response.status_code
+                self._remember_rate_limit(response)
                 logger.info("Trading 212 %s %s -> %s", method, path.split("?", 1)[0], status)
                 if status in {401, 403}:
                     raise Trading212AuthError(f"Trading 212 rejected the credentials (HTTP {status})")
@@ -170,6 +214,12 @@ class Trading212Client:
                     raise Trading212HTTPError(f"Trading 212 request failed (HTTP {status})") from exc
                 return response.json()
         raise Trading212TransientError("Trading 212 request failed")
+
+    def _remember_rate_limit(self, response: httpx.Response) -> None:
+        info = rate_limit_from_headers(response.headers, now=datetime.now(timezone.utc))
+        if info.limit is None and info.remaining is None and info.reset_at is None:
+            return
+        self.rate_limit = info
 
     def _retry_or_raise(self, attempt: int, path: str, reason: str, exc: Exception) -> None:
         logger.info("Trading 212 GET %s %s", path, reason)
@@ -247,6 +297,65 @@ def _money(currency: str, value: object) -> str:
     if currency == "GBP":
         return f"£{amount:,.2f}"
     return f"{amount:,.2f} {currency}"
+
+
+def take_until_known(
+    items: list,
+    known_ids: set[str],
+    identify: Callable[[dict[str, Any]], str],
+) -> tuple[list, bool]:
+    """Keep leading rows and stop at the first id already stored.
+
+    Trading 212 history pages are newest first. Stopping at a known id avoids
+    another full walk of older pages. An empty known set does not call this.
+    """
+    fresh: list = []
+    for item in items:
+        if isinstance(item, dict):
+            try:
+                event_id = identify(item)
+            except Exception:
+                event_id = ""
+            if event_id and event_id in known_ids:
+                return fresh, True
+        fresh.append(item)
+    return fresh, False
+
+
+def rate_limit_from_headers(headers, *, now: datetime) -> RateLimitInfo:
+    """Read x-ratelimit-limit, x-ratelimit-remaining, and x-ratelimit-reset."""
+    limit = _header_int(headers, "x-ratelimit-limit")
+    remaining = _header_int(headers, "x-ratelimit-remaining")
+    reset_at = _header_reset(headers.get("x-ratelimit-reset") if headers is not None else None, now)
+    return RateLimitInfo(limit=limit, remaining=remaining, reset_at=reset_at)
+
+
+def _header_int(headers, name: str) -> int | None:
+    if headers is None:
+        return None
+    raw = headers.get(name)
+    if raw in (None, ""):
+        return None
+    try:
+        return int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _header_reset(raw, now: datetime) -> datetime | None:
+    if raw in (None, ""):
+        return None
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    moment = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    moment = moment.astimezone(timezone.utc)
+    if value > 1_000_000_000:
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    if value < 0:
+        return None
+    return moment + timedelta(seconds=value)
 
 
 def _delay(response: httpx.Response, attempt: int) -> float:

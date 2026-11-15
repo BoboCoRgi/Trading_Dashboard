@@ -90,6 +90,25 @@ def stylesheet() -> str:
       font-weight: 650;
       letter-spacing: 0.03em;
     }}
+    .freshness {{
+      margin: 0.15rem 0 0.7rem;
+    }}
+    .freshness .fresh-name {{
+      margin: 0.45rem 0 0;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: {MUTED};
+    }}
+    .freshness .fresh-detail {{
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.35;
+    }}
+    .freshness .fresh-ok {{ color: {SAGE_INK}; }}
+    .freshness .fresh-stale {{ color: {APRICOT_INK}; }}
+    .freshness .fresh-failed {{ color: {CORAL_INK}; }}
+    .freshness .fresh-muted {{ color: {MUTED}; }}
     [data-testid="stHeader"] {{
       background: transparent;
     }}
@@ -326,6 +345,40 @@ def stylesheet() -> str:
       color: {INK};
     }}
     .ticker {{ font-weight: 740; letter-spacing: 0.01em; font-size: 16px; }}
+    .cell-main {{ line-height: 1.2; }}
+    .cell-sub {{
+      margin-top: 2px;
+      font-size: 12px;
+      line-height: 1.2;
+      color: {MUTED};
+      font-weight: 500;
+    }}
+    .cell-sub.pos {{ color: {SAGE_INK}; }}
+    .cell-sub.neg {{ color: {CORAL_INK}; }}
+    [data-testid="stButtonGroup"] [role="radiogroup"],
+    [data-testid="stSegmentedControl"] [role="radiogroup"] {{
+      background: {PAPER_2} !important;
+      border: 1px solid {LINE} !important;
+      border-radius: 999px !important;
+      padding: 3px !important;
+      gap: 2px;
+      width: fit-content;
+    }}
+    [data-testid="stButtonGroup"] button[role="radio"],
+    [data-testid="stSegmentedControl"] button {{
+      border: none !important;
+      border-radius: 999px !important;
+      color: {MUTED} !important;
+      background: transparent !important;
+      box-shadow: none !important;
+      font-weight: 650;
+    }}
+    [data-testid="stButtonGroup"] button[role="radio"][aria-checked="true"],
+    [data-testid="stSegmentedControl"] button[aria-checked="true"] {{
+      background: {PAPER} !important;
+      color: {INK} !important;
+      box-shadow: 0 0 0 1px {LINE} !important;
+    }}
     .bar {{
       height: 7px;
       width: 112px;
@@ -361,16 +414,75 @@ def stylesheet() -> str:
       font-size: 14px;
       padding: 8px 0 4px;
     }}
+    .holding-card {{
+      border: 1px solid {LINE};
+      background: {PAPER};
+      border-radius: 14px;
+      padding: 14px 14px 6px;
+      margin-bottom: 8px;
+    }}
+    .holding-symbol {{
+      margin: 0;
+      font-size: 22px;
+      font-weight: 720;
+      letter-spacing: -0.03em;
+      color: {INK};
+    }}
+    .holding-company {{
+      margin: 2px 0 10px;
+      color: {MUTED};
+      font-size: 13px;
+    }}
+    .holding-meta {{
+      margin: 0 0 8px;
+      color: {MUTED};
+      font-size: 13px;
+    }}
     .stack-item {{
       padding: 10px 0;
       border-bottom: 1px solid {LINE};
     }}
     .stack-item strong {{ font-weight: 700; }}
+    .trd-menu {{
+      display: none;
+      align-items: center;
+      border: none;
+      border-radius: 8px;
+      background: {BLUE_INK};
+      color: {PAPER};
+      font: 600 13px "Segoe UI", "Helvetica Neue", sans-serif;
+      padding: 6px 12px;
+      cursor: pointer;
+    }}
     @media (max-width: 900px) {{
       .metric-strip, .metric-strip.cols-4 {{ grid-template-columns: 1fr; }}
       .page-head {{ flex-direction: column; align-items: flex-start; }}
       .hero-value {{ font-size: 34px; }}
       .page-title {{ font-size: 30px; }}
+      div[data-testid="stHorizontalBlock"]:has(.holding-card) {{
+        flex-direction: column !important;
+      }}
+      [data-testid="stSidebar"] {{
+        position: fixed !important;
+        z-index: 1000002;
+        top: 0;
+        left: 0;
+        height: 100vh;
+        max-width: min(280px, 86vw);
+        transform: translateX(-105%) !important;
+        transition: none !important;
+      }}
+      body.trd-nav-open [data-testid="stSidebar"] {{
+        transform: none !important;
+        transition: none !important;
+      }}
+      [data-testid="stAppViewContainer"] {{
+        margin-left: 0 !important;
+      }}
+      .trd-menu {{
+        display: inline-flex;
+        margin: 0 0 12px;
+      }}
     }}
     </style>
     """

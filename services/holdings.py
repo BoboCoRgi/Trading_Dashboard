@@ -323,6 +323,10 @@ def _thesis(session: Session, instrument_id: str, origin: DataOrigin) -> dict | 
         "bear": row.bear_case,
         "catalysts": row.catalysts,
         "invalidation": row.invalidation_conditions,
+        "assumptions": row.assumptions or "",
+        "risks": row.risks or "",
+        "conviction": row.conviction,
+        "last_reviewed": row.last_reviewed_at.isoformat() if row.last_reviewed_at else None,
         "horizon": row.time_horizon,
         "status": row.status.value,
     }

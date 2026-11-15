@@ -30,16 +30,9 @@ def _base_context(session: Session, instrument_id: UUID | None, decision_id: UUI
             select(Thesis).where(Thesis.instrument_id == instrument.id).order_by(Thesis.updated_at.desc())
         )
         if thesis is not None:
-            context["thesis"] = {
-                "title": thesis.title,
-                "status": thesis.status.value,
-                "summary": thesis.thesis_summary,
-                "bull_case": thesis.bull_case,
-                "base_case": thesis.base_case,
-                "bear_case": thesis.bear_case,
-                "invalidation_conditions": thesis.invalidation_conditions,
-                "updated_at": thesis.updated_at.isoformat() if thesis.updated_at else None,
-            }
+            from services.research import thesis_context
+
+            context["thesis"] = thesis_context(thesis)
     from services.scan import radar_cards, recent_events
 
     context["market_events"] = recent_events(session, limit=5)

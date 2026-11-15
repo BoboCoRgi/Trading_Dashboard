@@ -11,16 +11,12 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from analytics.events import rebase_to_start
-from core.enums import AIRole, AnalysisTrigger
 from core.money import D
 from db.models import (
-    AIRun,
     BrokerAccount,
     Decision,
     DecisionOutcome,
     Instrument,
-    MarketEvent,
     OpportunityCandidate,
     OpportunityOutcome,
     PortfolioSnapshot,
@@ -210,126 +206,6 @@ def decision_chart_data(session: Session, decision_id: str) -> dict:
     }
 
 
-def _aligned_rebase(series: list[tuple], dates: list) -> list[dict] | None:
-    by_date = {stamp.date(): D(price) for stamp, price in series}
-    overlap = [(day, by_date[day]) for day in dates if day in by_date]
-    if len(overlap) < 2:
-        return None
-    rebased = rebase_to_start([price for _day, price in overlap])
-    if rebased is None:
-        return None
-    return [
-        {"date": day.isoformat(), "value": float(value)}
-        for (day, _price), value in zip(overlap, rebased, strict=True)
-    ]
-
-
-def event_context(
-    session: Session,
-    event_id: str,
-    provider: PortfolioDataProvider | None = None,
-) -> dict | None:
-    event = session.get(MarketEvent, UUID(str(event_id)))
-    if event is None:
-        return None
-    instrument = session.get(Instrument, event.instrument_id)
-    if instrument is None:
-        return None
-    prices = session.scalars(
-        select(PriceObservation)
-        .where(PriceObservation.instrument_id == instrument.id)
-        .order_by(PriceObservation.as_of)
-    ).all()
-    day = event.event_date.astimezone(timezone.utc).date() if event.event_date.tzinfo else event.event_date.date()
-    window = [row for row in prices if row.as_of.date() <= day][-63:]
-    price_points = [{"date": row.as_of.date().isoformat(), "price": float(D(row.price))} for row in window]
-    dates = [row.as_of.date() for row in window]
-    relative = []
-    relative_note = "Requires market data integration for an index or sector benchmark."
-    own = _aligned_rebase([(row.as_of, row.price) for row in window], dates)
-    if own:
-        relative.append({"name": instrument.symbol, "points": own})
-    peers = session.scalars(select(Instrument).where(Instrument.theme == instrument.theme, Instrument.id != instrument.id)).all()
-    for peer in peers:
-        peer_prices = session.scalars(
-            select(PriceObservation).where(PriceObservation.instrument_id == peer.id).order_by(PriceObservation.as_of)
-        ).all()
-        line = _aligned_rebase([(row.as_of, row.price) for row in peer_prices], dates)
-        if line:
-            relative.append({"name": peer.symbol, "points": line})
-    if len(relative) > 1:
-        relative_note = (
-            f"Held names in {instrument.theme}, each rebased to 100 on the first shared close. "
-            "This compares paths. It does not identify a cause. No index is stored."
-        )
-    elif relative:
-        relative_note = "No other holding shares this theme. " + relative_note
-
-    thesis_row = session.get(Thesis, event.linked_thesis_id) if event.linked_thesis_id else None
-    if thesis_row is None:
-        thesis_row = session.scalar(
-            select(Thesis).where(Thesis.instrument_id == instrument.id).order_by(Thesis.updated_at.desc())
-        )
-    thesis = None
-    if thesis_row is not None:
-        thesis = {
-            "title": thesis_row.title,
-            "stored_status": thesis_row.status.value,
-            "overall": "UNCERTAIN",
-            "summary": thesis_row.thesis_summary,
-            "invalidation": thesis_row.invalidation_conditions,
-            "note": "Separate thesis pillars are not stored. The stored status was not changed because the price moved.",
-        }
-
-    runs = session.scalars(
-        select(AIRun)
-        .where(
-            AIRun.instrument_id == instrument.id,
-            AIRun.trigger == AnalysisTrigger.LARGE_PRICE_MOVE,
-            AIRun.role.in_([AIRole.ANALYST, AIRole.SKEPTIC, AIRole.RISK_OFFICER, AIRole.SYNTHESIS]),
-        )
-        .order_by(AIRun.created_at.desc())
-    ).all()
-    picked: dict[str, AIRun] = {}
-    for run in runs:
-        role = run.role.value
-        if role not in picked:
-            picked[role] = run
-    analyses = [
-        {
-            "role": role,
-            "response": run.structured_response_json,
-            "meta": f"{run.provider} · {run.model}",
-        }
-        for role, run in picked.items()
-    ]
-    when = event.event_date.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if event.event_date.tzinfo else str(event.event_date)
-    return {
-        "id": str(event.id),
-        "symbol": instrument.symbol,
-        "prices": price_points,
-        "relative": relative,
-        "relative_note": relative_note,
-        "contribution": None,
-        "timeline": [
-            {
-                "when": when,
-                "text": f"{instrument.symbol} close stored. No intraday print, news, or filing is stored.",
-            }
-        ],
-        "thesis": thesis,
-        "evidence": event.context_note,
-        "counter": "No news or filing is attached. A price move can have a cause that is not in this database.",
-        "would_change": [
-            "A primary source that explains the move.",
-            "An index or sector series, so the classification can leave unknown.",
-            "Evidence that meets or breaks the stored invalidation condition.",
-        ],
-        "analyses": analyses,
-        "linked_decision": event.linked_decision_id is not None,
-    }
-
-
 def outcome_board(session: Session) -> list[dict]:
     rows = session.execute(
         select(OpportunityCandidate, Instrument)
@@ -353,7 +229,7 @@ def outcome_board(session: Session) -> list[dict]:
             if outcome.return_pct is None:
                 horizons.append(f"{outcome.horizon_code.value} awaiting later closes")
             else:
-                horizons.append(f"{outcome.horizon_code.value} {float(D(outcome.return_pct) * 100):.1f}%")
+                horizons.append(f"{outcome.horizon_code.value} {float(D(outcome.return_pct) * 100):,.2f}%")
         board.append(
             {
                 "symbol": instrument.symbol,

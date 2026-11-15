@@ -1,186 +1,348 @@
-from uuid import UUID
+"""Research workspace: watchlist, thesis, stored events, and the shared stock chart."""
 
 import streamlit as st
 
-from app.dashboard.charts import opportunity_scatter, show_chart
-from app.dashboard.event_panel import render_event_dive
-from app.dashboard.components import (
-    ai_agent_panel,
-    catalyst_lane,
-    choice_rows,
-    empty_state,
-    market_event_card,
-    opportunity_card,
-    page_header,
-    section_header,
-    styled_table,
-    thesis_panel,
-)
-from app.dashboard.present import STATUS_TONE
+from app.dashboard.components import ai_agent_panel, empty_state, page_header, section_header
 from app.dashboard.system_status import database_unavailable_message
-from app.dashboard.series import event_context, expectation_points, outcome_board, thesis_questions
 from app.dashboard.theme import LAVENDER
+from app.dashboard.views.stock_detail import render_instrument
+from app.dashboard.views.top_holdings import _change, _price
 from core.config import get_settings
-from core.enums import AnalysisTrigger
+from core.enums import AnalysisTrigger, WatchlistStatus
+from app.dashboard.present import two_places
 from db.session import session_scope
-from research.library import add_note
-from services.queries import ai_review, research_view
-from services.scan import radar_cards, recent_events, refresh_scan
 from services.ai_reuse import should_invoke_model
+from services.portfolio_source import portfolio_provider
+from services.queries import ai_review
+from services.research import (
+    EMPTY_EVENTS,
+    EMPTY_THESIS,
+    SECTIONS,
+    THESIS_STATUSES,
+    WATCH_STATUSES,
+    add_watch,
+    apply_open,
+    dive_context,
+    events_for,
+    fallback_source,
+    load_universe,
+    remove_watch,
+    save_thesis,
+    thesis_for,
+)
 from services.triggers import TriggerDispatcher
 
 
 def render() -> None:
-    page_header(
-        "Research lab",
-        "Theses, catalysts, and the questions still open.",
-        accent=LAVENDER,
-    )
+    provider = portfolio_provider()
+    settings = get_settings()
     try:
         with session_scope() as session:
-            view = research_view(session)
-            refresh_scan(session)
-            points = expectation_points(session)
-            questions = thesis_questions(session)
-            events = recent_events(session)
-            radar = radar_cards(session)
-            dives = {event["id"]: event_context(session, event["id"]) for event in events}
-            outcomes = outcome_board(session)
+            source = provider.status(session)
+            universe = load_universe(session, provider)
+    except Exception:
+        page_header(
+            "Research lab",
+            "Watchlist, the thesis, known events, and one name in detail.",
+            accent=LAVENDER,
+            source=fallback_source(settings.data_mode),
+        )
+        st.error(database_unavailable_message(settings.data_mode))
+        return
+    page_header(
+        "Research lab",
+        "Watchlist, the thesis, known events, and one name in detail.",
+        accent=LAVENDER,
+        source=source,
+    )
+    if "research_section_widget" not in st.session_state:
+        st.session_state["research_section_widget"] = "Watchlist"
+    if universe and st.session_state.get("research_instrument_id") not in {row["instrument_id"] for row in universe}:
+        st.session_state["research_instrument_id"] = universe[0]["instrument_id"]
+    st.segmented_control("Research section", list(SECTIONS), key="research_section_widget", label_visibility="collapsed")
+    section = st.session_state.get("research_section_widget") or "Watchlist"
+    if section == "Theses":
+        _theses(universe, provider)
+    elif section == "Catalysts & Events":
+        _events(universe)
+    elif section == "Deep Dive":
+        _dive(universe, source, provider)
+    else:
+        _watchlist(universe, provider)
+
+
+def _watchlist(universe: list[dict], provider) -> None:
+    section_header("Watchlist", "Holdings, names you add, and names already attached to a thesis or decision.")
+    with st.form("add-watch", clear_on_submit=True):
+        ticker = st.text_input("Ticker")
+        status = st.selectbox("Status", list(WATCH_STATUSES))
+        submitted = st.form_submit_button("Add to watchlist")
+    if submitted:
+        _add(ticker, status, provider)
+    notice = st.session_state.pop("research_notice", None)
+    if notice:
+        st.caption(notice)
+    if not universe:
+        empty_state("Add a ticker to start a watchlist. Current holdings appear here on their own.")
+        return
+    for row in universe:
+        symbol, action = st.columns([6, 1])
+        symbol.button(
+            f"{row['symbol']}  {row['company']}",
+            key=f"open-{row['instrument_id']}",
+            on_click=apply_open,
+            args=(st.session_state, row["instrument_id"]),
+        )
+        if row["removable"]:
+            action.button("Remove", key=f"remove-{row['instrument_id']}", on_click=_remove, args=(row,))
+        st.caption(
+            " · ".join(
+                [
+                    row["status"],
+                    _price(row["price"], row["currency"]),
+                    f"1D {_change(row['day_pct'])}",
+                    f"1M {_change(row['month_pct'])}",
+                    f"Weight {_weight(row['weight'])}" if row["held"] else "Weight —",
+                    f"Thesis {'Yes' if row['active_thesis'] else 'No'}",
+                    f"Reviewed {row['last_reviewed'] or '—'}",
+                    f"Next {row['next_catalyst'] or '—'}",
+                ]
+            )
+        )
+
+
+def _theses(universe: list[dict], provider) -> None:
+    section_header("Theses", "One record per stock. Saving it does not create a decision.")
+    selected = _picker(universe)
+    if selected is None:
+        empty_state("Add a holding or a ticker before writing a thesis.")
+        return
+    try:
+        with session_scope() as session:
+            current = thesis_for(session, selected["instrument_id"], origin=provider.origin)
     except Exception:
         st.error(database_unavailable_message(get_settings().data_mode))
         return
-    for thesis in view["theses"]:
-        thesis["catalysts"] = questions.get(thesis["id"], "")
-    watch_symbols = {row["symbol"] for row in view["watchlist"]}
-    points = [point for point in points if point["symbol"] in watch_symbols]
-    radar_tab, events_tab, outcomes_tab, watch, theses, catalysts, notes, dive = st.tabs(
-        ["Radar", "Events", "Outcomes", "Watchlist", "Theses", "Catalysts", "Notes", "Deep dive"]
-    )
-    with radar_tab:
-        section_header("Opportunity radar", "Holdings and the watchlist only. A flag is not a buy.")
-        if not radar:
-            empty_state("No screen flag on the latest snapshot.")
-        for row in radar:
-            opportunity_card(row)
-        section_header("Where are the stored expectations?", "Decision expectations. Higher is not a reason to buy.")
-        if points:
-            show_chart(opportunity_scatter(points))
-        else:
-            empty_state("Expected upside and downside are not stored yet.")
-    with events_tab:
-        section_header("Market events", "No index is stored, so classification stays unknown.")
-        if not events:
-            empty_state("No unusual move is stored for the latest snapshot.")
-        for event in events:
-            market_event_card(event)
-            detail = dives.get(event["id"])
-            if detail:
-                with st.expander(f"{event['symbol']} event detail"):
-                    render_event_dive(detail)
-    with outcomes_tab:
-        section_header("Opportunity outcomes", "Forward returns stay blank until those sessions exist. Rejected names stay on this list.")
-        if not outcomes:
-            empty_state("No opportunity candidate is stored yet.")
-        else:
-            styled_table(
-                ["Symbol", "Detected", "Type", "Status", "Decision", "Forward path"],
-                [
-                    [row["symbol"], row["detected"], row["type"], row["status"], row["decision"], row["horizons"]]
-                    for row in outcomes
-                ],
-            )
-    with watch:
-        plotted = {point["symbol"] for point in points}
-        missing = [row["symbol"] for row in view["watchlist"] if row["symbol"] not in plotted]
-        if missing:
-            st.caption("Not plotted, because no expected upside and downside are stored: " + ", ".join(missing))
-        choice_rows(
-            [
-                {
-                    "badge": row["status"],
-                    "tone": STATUS_TONE.get(row["status"], "lavender"),
-                    "title": row["symbol"],
-                    "detail": row["notes"],
-                }
-                for row in view["watchlist"]
-            ]
+    if current is None:
+        empty_state(EMPTY_THESIS)
+    options = list(THESIS_STATUSES)
+    if current and current["status"] not in options:
+        options.append(current["status"])
+    conviction_options = ["—", 1, 2, 3, 4, 5]
+    with st.form(f"thesis-{selected['instrument_id']}"):
+        summary = st.text_area("Thesis summary", value="" if current is None else current["summary"] or "")
+        bull = st.text_area("Bull case", value="" if current is None else current["bull_case"] or "")
+        bear = st.text_area("Bear case", value="" if current is None else current["bear_case"] or "")
+        assumptions = st.text_area("Key assumptions", value="" if current is None else current["assumptions"] or "")
+        risks = st.text_area("Risks", value="" if current is None else current["risks"] or "")
+        catalysts = st.text_area("Catalysts", value="" if current is None else current["catalysts"] or "")
+        invalidation = st.text_area(
+            "Invalidation conditions",
+            value="" if current is None else current["invalidation_conditions"] or "",
         )
-    with theses:
-        if not view["theses"]:
-            empty_state("No thesis is stored.")
-        for thesis in view["theses"]:
-            thesis_panel(thesis)
-    with catalysts:
-        section_header("Catalysts", "No confirmed calendar date is stored, so these are not placed on a timeline.")
-        catalyst_lane(view["catalysts"])
-    with notes:
-        choice_rows(
-            [
-                {
-                    "title": row["title"],
-                    "badge": row["symbol"],
-                    "tone": "lavender",
-                    "meta": row["created_at"],
-                    "detail": row["body"],
-                }
-                for row in view["notes"]
-            ]
+        conviction = st.selectbox(
+            "Conviction",
+            conviction_options,
+            index=_index(conviction_options, "—" if current is None or current["conviction"] is None else current["conviction"], default=0),
         )
-        with st.form("add-note"):
-            symbols = [row["symbol"] for row in view["instruments"]]
-            symbol = st.selectbox("Instrument", symbols)
-            title = st.text_input("Title")
-            body = st.text_area("Note")
-            saved = st.form_submit_button("Save note")
-        if saved and title.strip() and body.strip():
-            instrument_id = UUID(next(row["id"] for row in view["instruments"] if row["symbol"] == symbol))
-            with session_scope() as session:
-                add_note(session, instrument_id=instrument_id, title=title, body=body)
-            st.success("Note stored.")
-            st.rerun()
-    with dive:
-        symbols = [row["symbol"] for row in view["instruments"]]
-        symbol = st.selectbox("Instrument for a deep dive", symbols, key="dive-symbol")
-        st.caption("A deep dive runs Analyst, Skeptic, Risk Officer, and Synthesis. It does not rank a trade.")
-        st.checkbox("Send this context to the configured external provider", key="confirm_external_research")
-        if should_invoke_model(button_clicked=st.button("Deep dive"), cached=False):
-            try:
-                with session_scope() as session:
-                    result = TriggerDispatcher().emit(
-                        session,
-                        AnalysisTrigger.MANUAL_DEEP_DIVE,
-                        instrument_symbol=symbol,
-                        allow_external=st.session_state.get("confirm_external_research", False),
-                    )
-                if result.status == "unavailable":
-                    st.error("AI analysis temporarily unavailable.")
-                elif result.status in {"completed", "stored"}:
-                    st.rerun()
-                else:
-                    st.info(f"{result.status}: {result.detail}")
-            except Exception:
-                st.error("AI analysis temporarily unavailable.")
-        try:
-            with session_scope() as session:
-                review = ai_review(session)
-        except Exception:
-            review = {"runs": []}
-        shown = 0
-        for run in review["runs"]:
-            if run.get("status") not in {None, "completed"}:
-                continue
-            if run["trigger"] not in {"MANUAL_DEEP_DIVE", "PRE_DECISION_REVIEW"}:
-                continue
-            if shown >= 4:
-                break
-            ai_agent_panel(
-                run["role"],
-                run["response"],
-                meta=(
-                    f"{run['provider']} · {run['model']} · thinking {run.get('thinking_level') or '—'} · "
-                    f"analysis {run['time']}"
-                ),
+        horizon = st.text_input("Time horizon", value="" if current is None else current["time_horizon"] or "")
+        status = st.selectbox(
+            "Status",
+            options,
+            index=_index(options, None if current is None else current["status"], default=0),
+        )
+        saved = st.form_submit_button("Save thesis")
+    if current and current.get("last_reviewed"):
+        st.caption(f"Last reviewed {current['last_reviewed'][:10]}.")
+    if saved:
+        _save(selected, summary, bull, bear, assumptions, risks, catalysts, invalidation, conviction, horizon, status)
+
+
+def _events(universe: list[dict]) -> None:
+    section_header("Catalysts and events", "Only dates and notes that are already stored. Nothing is filled in.")
+    selected = _picker(universe)
+    if selected is None:
+        empty_state("Choose a stock from the watchlist.")
+        return
+    try:
+        with session_scope() as session:
+            rows = events_for(session, selected["instrument_id"])
+    except Exception:
+        st.error(database_unavailable_message(get_settings().data_mode))
+        return
+    if not rows:
+        empty_state(EMPTY_EVENTS)
+        return
+    for row in rows:
+        st.markdown(f"**{row['title']}**")
+        st.caption(" · ".join(part for part in (row["kind"], row["when_label"], row["detail"]) if part))
+
+
+def _dive(universe: list[dict], source: dict, provider) -> None:
+    selected = _picker(universe)
+    if selected is None:
+        empty_state("Choose a stock from the watchlist.")
+        return
+    render_instrument(selected["instrument_id"], embedded=True, source=source)
+    try:
+        with session_scope() as session:
+            context = dive_context(session, selected["instrument_id"], origin=provider.origin)
+            review = ai_review(session, selected["instrument_id"])
+    except Exception:
+        st.error(database_unavailable_message(get_settings().data_mode))
+        return
+    section_header("Thesis", "")
+    thesis = context["thesis"]
+    if not thesis:
+        empty_state(EMPTY_THESIS)
+        st.button("Add a thesis", on_click=_go, args=("Theses",))
+    else:
+        _show_thesis(thesis)
+    if context["events"]:
+        section_header("Stored events", "")
+        for row in context["events"]:
+            st.caption(" · ".join(part for part in (row["when_label"], row["kind"], row["title"]) if part))
+    else:
+        st.caption(EMPTY_EVENTS)
+    if context["decisions"]:
+        section_header("Decisions", "")
+        for row in context["decisions"]:
+            st.caption(f"{row['created_at'] or '—'} · {row['decision_type']} · {row['status']}")
+    section_header("Gemini review", "Analyst, Skeptic, Risk Officer, and Synthesis. This does not rank a trade.")
+    st.checkbox("Send this context to the configured external provider", key="confirm_external_research")
+    clicked = st.button("Challenge this thesis")
+    if should_invoke_model(button_clicked=clicked, cached=False):
+        _challenge(selected["symbol"])
+    shown = [
+        run
+        for run in review["runs"]
+        if run["trigger"] in {AnalysisTrigger.MANUAL_DEEP_DIVE.value, AnalysisTrigger.PRE_DECISION_REVIEW.value}
+    ][:8]
+    if not shown:
+        st.caption("No Gemini review is stored for this name.")
+        return
+    for run in shown:
+        meta = f"{run['time']} · {run['provider']} · {run['model']}"
+        ai_agent_panel(run["role"], run["response"], meta)
+
+
+def _picker(universe: list[dict]) -> dict | None:
+    if not universe:
+        return None
+    labels = [f"{row['symbol']} · {row['company']}" for row in universe]
+    current = st.session_state.get("research_instrument_id")
+    index = next((pos for pos, row in enumerate(universe) if row["instrument_id"] == current), 0)
+    choice = st.selectbox("Stock", labels, index=index)
+    selected = universe[labels.index(choice)]
+    st.session_state["research_instrument_id"] = selected["instrument_id"]
+    return selected
+
+
+def _add(ticker: str, status: str, provider) -> None:
+    try:
+        with session_scope() as session:
+            added = add_watch(session, ticker, origin=provider.origin, status=WatchlistStatus(status))
+    except ValueError as exc:
+        st.warning(str(exc))
+        return
+    except Exception:
+        st.error(database_unavailable_message(get_settings().data_mode))
+        return
+    st.session_state["research_instrument_id"] = added["instrument_id"]
+    st.rerun()
+
+
+def _remove(row: dict) -> None:
+    try:
+        with session_scope() as session:
+            result = remove_watch(session, row["instrument_id"], held=row["held"])
+    except Exception:
+        return
+    if not result.get("removed"):
+        st.session_state["research_notice"] = result.get("reason") or "This name stays on the list."
+
+
+def _save(selected, summary, bull, bear, assumptions, risks, catalysts, invalidation, conviction, horizon, status) -> None:
+    try:
+        with session_scope() as session:
+            save_thesis(
+                session,
+                selected["instrument_id"],
+                {
+                    "summary": summary,
+                    "bull_case": bull,
+                    "bear_case": bear,
+                    "assumptions": assumptions,
+                    "risks": risks,
+                    "catalysts": catalysts,
+                    "invalidation": invalidation,
+                    "conviction": None if conviction == "—" else conviction,
+                    "time_horizon": horizon,
+                    "status": status,
+                },
+                origin=portfolio_provider().origin,
             )
-            shown += 1
-        if shown == 0:
-            empty_state("No deep dive is stored yet.")
+    except ValueError as exc:
+        st.warning(str(exc))
+        return
+    except Exception:
+        st.error(database_unavailable_message(get_settings().data_mode))
+        return
+    st.rerun()
+
+
+def _challenge(symbol: str) -> None:
+    try:
+        with session_scope() as session:
+            result = TriggerDispatcher().emit(
+                session,
+                AnalysisTrigger.MANUAL_DEEP_DIVE,
+                instrument_symbol=symbol,
+                allow_external=st.session_state.get("confirm_external_research", False),
+            )
+    except Exception:
+        st.error("AI analysis temporarily unavailable.")
+        return
+    if result.status == "unavailable":
+        st.error("AI analysis temporarily unavailable.")
+    elif result.status in {"completed", "stored"}:
+        st.rerun()
+    else:
+        st.caption(result.detail or result.status)
+
+
+def _show_thesis(thesis: dict) -> None:
+    bits = [thesis.get("status") or "", f"Conviction {thesis['conviction']}" if thesis.get("conviction") else ""]
+    horizon = thesis.get("time_horizon") or ""
+    if horizon:
+        bits.append(horizon)
+    st.caption(" · ".join(bit for bit in bits if bit))
+    for label, key in (
+        ("Summary", "summary"),
+        ("Bull case", "bull_case"),
+        ("Bear case", "bear_case"),
+        ("Assumptions", "assumptions"),
+        ("Risks", "risks"),
+        ("Catalysts", "catalysts"),
+        ("Invalidation", "invalidation_conditions"),
+    ):
+        text = (thesis.get(key) or "").strip()
+        if text:
+            st.markdown(f"**{label}**")
+            st.write(text)
+
+
+def _go(section: str) -> None:
+    st.session_state["research_section_widget"] = section
+
+
+def _weight(value) -> str:
+    if value is None:
+        return "—"
+    return f"{two_places(float(value) * 100)}%"
+
+
+def _index(options: list, value, *, default: int) -> int:
+    if value in options:
+        return options.index(value)
+    return default

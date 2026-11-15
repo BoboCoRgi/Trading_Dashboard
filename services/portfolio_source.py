@@ -116,12 +116,15 @@ class PortfolioDataProvider:
         if not loaded:
             snapshot = self.latest_snapshot(session)
         settings = get_settings()
-        return describe_source(
+        payload = describe_source(
             self,
             snapshot,
             now=now or datetime.now(timezone.utc),
             interval_minutes=settings.snapshot_interval_minutes if interval_minutes is None else interval_minutes,
         )
+        if self.origin is DataOrigin.LIVE:
+            _attach_broker_phrase(session, payload)
+        return payload
 
 
 class MockPortfolioProvider(PortfolioDataProvider):
@@ -165,6 +168,22 @@ class InvalidDataModeProvider(PortfolioDataProvider):
             message=f"DATA_MODE must be mock or live. It is set to {self.raw!r}.",
             command=None,
         )
+
+
+def _attach_broker_phrase(session: Session, payload: dict) -> None:
+    """Use the last broker refresh when it is known. Snapshot age stays the fallback."""
+    try:
+        from services.t212_refresh import load_dashboard_freshness
+
+        fresh = load_dashboard_freshness(session, live=True)
+    except Exception:
+        return
+    phrase = fresh.get("phrase")
+    if not phrase or phrase == "Not refreshed yet":
+        return
+    payload["broker_phrase"] = phrase
+    payload["stale"] = bool(fresh.get("phrase_stale"))
+    payload["age_label"] = None
 
 
 def portfolio_provider(settings: Settings | None = None) -> PortfolioDataProvider:

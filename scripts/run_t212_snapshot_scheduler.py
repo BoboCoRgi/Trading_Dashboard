@@ -2,7 +2,7 @@
 
 There is no market-hours calendar in this project. The job runs whenever this
 process is running, including outside exchange hours. Stop it with Ctrl+C.
-The dashboard does not start this process.
+The dashboard starts scripts.run_t212_refresh_worker instead of this process.
 
 A snapshot time is the start of the interval, for example 12:00, 12:15, 12:30
 when the interval is 15 minutes. A second run for that same timestamp does

@@ -53,6 +53,15 @@ class Settings(BaseSettings):
     t212_position_poll_seconds: int = 30
     t212_account_poll_seconds: int = 60
     t212_history_poll_seconds: int = 300
+    t212_current_refresh_minutes: int = 5
+    t212_history_refresh_minutes: int = 30
+    t212_fresh_minutes: int = 5
+    t212_rate_limit_floor: int = 8
+
+    # twelvedata: fetch historical bars when the local cache is missing or stale.
+    # A blank key does not fall back to mock prices.
+    market_data_provider: str = "twelvedata"
+    twelve_data_api_key: str = ""
 
     @field_validator(
         "concentration_top1_alert",
@@ -101,6 +110,10 @@ class Settings(BaseSettings):
     @property
     def has_gemini(self) -> bool:
         return bool(self.gemini_api_key.strip())
+
+    @property
+    def has_twelve_data(self) -> bool:
+        return self.market_data_provider.strip().lower() == "twelvedata" and bool(self.twelve_data_api_key.strip())
 
 
 @lru_cache

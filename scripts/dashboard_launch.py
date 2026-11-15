@@ -1,7 +1,7 @@
 """Prepare the local dashboard and open it.
 
-The Trading 212 path calls the existing history sync and live snapshot.
-It does not seed, reset, or place orders.
+Live mode starts the Trading 212 refresh worker. The worker, not a browser
+rerun, calls the broker. This script does not seed, reset, or place orders.
 """
 
 from __future__ import annotations
@@ -58,6 +58,8 @@ class LaunchContext:
     create_snapshot: callable
     prepare_mock: callable
     terminate: callable = lambda pid: None
+    start_worker: callable = lambda: None
+    workers: callable = lambda: []
     sleep: callable = time.sleep
     now: callable = time.monotonic
     port: int = STREAMLIT_PORT
@@ -101,6 +103,31 @@ def is_this_dashboard(command: str | None, root: Path) -> bool:
     normalized = command.replace("\\", "/").lower()
     root_text = str(root).replace("\\", "/").lower()
     return "streamlit" in normalized and STREAMLIT_SCRIPT in normalized and root_text in normalized
+
+
+def is_refresh_worker(command: str | None, root: Path) -> bool:
+    if not command:
+        return False
+    normalized = command.replace("\\", "/").lower()
+    root_text = str(root).replace("\\", "/").lower()
+    return "run_t212_refresh_worker" in normalized and root_text in normalized
+
+
+def refresh_worker_pids(processes: list[dict], root: Path, pid_text: str | None = None) -> list[int]:
+    """Pids for this project's refresh worker. A pid file is used only when that pid is listed."""
+    pids: list[int] = []
+    listed = {int(row["pid"]): row for row in processes if isinstance(row.get("pid"), int)}
+    for pid, row in listed.items():
+        if is_refresh_worker(row.get("command"), root) and pid not in pids:
+            pids.append(pid)
+    text = (pid_text or "").strip()
+    if text.isdigit():
+        extra = int(text)
+        row = listed.get(extra)
+        command = "" if row is None else (row.get("command") or "")
+        if row is not None and not command.strip() and extra not in pids:
+            pids.append(extra)
+    return pids
 
 
 def find_first_existing(candidates: list[Path]) -> Path | None:
@@ -177,12 +204,7 @@ def run_startup(ctx: LaunchContext) -> int:
     ctx.say("[OK] Database migrations")
     mode = str(ctx.data_mode() or "").strip().lower()
     if mode == "live":
-        overall = ctx.sync_broker()
-        ctx.say("[OK] Trading 212 sync")
-        mark = "OK" if overall == "PASS" else "WARN"
-        ctx.say(f"[{mark}] Position reconciliation: {overall}")
-        created = ctx.create_snapshot()
-        ctx.say("[OK] Live snapshot created" if created else "[OK] Live snapshot already current")
+        _ensure_worker(ctx)
     elif mode == "mock":
         ctx.prepare_mock()
     else:
@@ -202,12 +224,52 @@ def stop_dashboard(ctx: LaunchContext, processes: list[dict]) -> int:
         for row in matched:
             ctx.terminate(row["pid"])
         ctx.say("[OK] Streamlit stopped")
+    workers = refresh_worker_pids(processes, ctx.root, _pid_text(ctx.root))
+    if not workers:
+        ctx.say("[OK] Background refresh was not running")
+    else:
+        for pid in workers:
+            ctx.terminate(pid)
+        ctx.say("[OK] Background refresh stopped")
+    _clear_pid(ctx.root)
     stopped = ctx.run([str(ctx.docker_bin), "compose", "stop"] if ctx.docker_bin else ["docker", "compose", "stop"])
     if stopped.code == 0:
         ctx.say("[OK] Project containers stopped")
     else:
         ctx.say("[WARN] Project containers were not stopped")
     return 0
+
+
+def _ensure_worker(ctx: LaunchContext) -> None:
+    running = refresh_worker_pids(ctx.workers(), ctx.root, _pid_text(ctx.root))
+    if running:
+        ctx.say("[OK] Background refresh running")
+        return
+    try:
+        ctx.start_worker()
+    except Exception as exc:
+        ctx.say(f"[WARN] Background refresh did not start ({exc.__class__.__name__})")
+        return
+    ctx.say("[OK] Background refresh running")
+
+
+def _pid_text(root: Path) -> str | None:
+    path = root / "logs" / "t212_refresh.pid"
+    if not path.is_file():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _clear_pid(root: Path) -> None:
+    path = root / "logs" / "t212_refresh.pid"
+    if path.is_file():
+        try:
+            path.unlink()
+        except OSError:
+            return
 
 
 def _ensure_streamlit(ctx: LaunchContext) -> None:
@@ -237,7 +299,12 @@ def _secret_values() -> list[str]:
 
     settings = get_settings()
     password = urlparse(settings.database_url).password or ""
-    return [settings.t212_api_key.strip(), settings.t212_api_secret.strip(), password.strip()]
+    return [
+        settings.t212_api_key.strip(),
+        settings.t212_api_secret.strip(),
+        settings.twelve_data_api_key.strip(),
+        password.strip(),
+    ]
 
 
 def _data_mode() -> str:
@@ -399,6 +466,23 @@ def _http_ready(port: int) -> bool:
         return False
 
 
+def _start_worker(root: Path, python: Path) -> None:
+    log_dir = root / "logs"
+    log_dir.mkdir(exist_ok=True)
+    handle = (log_dir / "t212_refresh.log").open("a", encoding="utf-8")
+    flags = 0
+    if os.name == "nt":
+        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    subprocess.Popen(
+        [str(python), "-m", "scripts.run_t212_refresh_worker"],
+        cwd=root,
+        stdout=handle,
+        stderr=handle,
+        creationflags=flags,
+        close_fds=True,
+    )
+
+
 def _start_streamlit(root: Path, python: Path, port: int) -> None:
     log_dir = root / "logs"
     log_dir.mkdir(exist_ok=True)
@@ -470,6 +554,8 @@ def build_context(root: Path, *, stop: bool = False) -> LaunchContext:
         run=lambda args: _run(root, args),
         listeners=lambda port: _listeners(port, root),
         start_streamlit=lambda: _start_streamlit(root, python, STREAMLIT_PORT),
+        start_worker=lambda: _start_worker(root, python),
+        workers=lambda: _processes(root),
         http_ready=lambda: _http_ready(STREAMLIT_PORT),
         open_browser=webbrowser.open,
         sync_broker=_sync_broker,

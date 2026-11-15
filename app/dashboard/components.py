@@ -58,28 +58,60 @@ def show(markup: str) -> None:
     st.html(markup)
 
 
-def source_banner(source: dict | None) -> str:
+def source_banner(source: dict | None, *, compact: bool = False) -> str:
     if not source:
         return ""
     mode = source.get("mode")
     stale = bool(source.get("stale"))
-    if mode == "live" and stale:
+    if compact:
+        return _compact_source(source, mode=mode, stale=stale)
+    phrase = source.get("broker_phrase")
+    if mode == "live" and stale and not phrase:
         tone = "stale"
     elif mode == "live":
         tone = "live"
     else:
         tone = "mock"
-    badge = status_badge("Stale", "apricot") if stale else ""
+    badge = "" if phrase else (status_badge("Stale", "apricot") if stale else "")
     parts = [f'<p class="source-line {tone}">{_esc(source.get("label") or "")}{" " + badge if badge else ""}</p>']
+    if phrase:
+        parts.append(f'<p class="source-meta">{_esc(phrase)}</p>')
     if source.get("snapshot_clock"):
         parts.append(f'<p class="source-meta">Last snapshot: {_esc(source["snapshot_clock"])}</p>')
-    if source.get("age_label"):
+    if source.get("age_label") and not phrase:
         parts.append(f'<p class="source-meta">{_esc(source["age_label"])}</p>')
     if mode == "mock" and source.get("ready"):
         parts.append(
             '<p class="source-meta">Brokers are not connected. Nothing here is an instruction to trade.</p>'
         )
     return f'<div class="source-banner">{"".join(parts)}</div>'
+
+
+def _compact_source(source: dict, *, mode: str | None, stale: bool) -> str:
+    tone = "live" if mode == "live" else "mock"
+    parts = [f'<p class="source-line {tone}">{_esc(source.get("label") or "")}</p>']
+    phrase = source.get("broker_phrase")
+    if phrase:
+        parts.append(f'<p class="source-meta">{_esc(phrase)}</p>')
+    elif stale:
+        parts.append(f'<p class="source-meta">{_esc(_stale_phrase(source.get("age_label")))}</p>')
+    elif mode == "mock" and source.get("ready"):
+        parts.append(
+            '<p class="source-meta">Brokers are not connected. Nothing here is an instruction to trade.</p>'
+        )
+    return f'<div class="source-banner">{"".join(parts)}</div>'
+
+
+def _stale_phrase(age_label: str | None) -> str:
+    text = age_label or ""
+    count = ""
+    for token in text.split():
+        if token.isdigit():
+            count = token
+            break
+    if count:
+        return f"Stale · updated {count} min ago"
+    return "Stale"
 
 
 def portfolio_unavailable(source: dict | None) -> None:
@@ -91,7 +123,36 @@ def portfolio_unavailable(source: dict | None) -> None:
         st.code(command, language="text")
 
 
-def page_header(title: str, purpose: str, meta: str = "", accent: str = "", source: dict | None = None) -> None:
+def page_banner(source: dict | None, *, compact: bool = False) -> str:
+    """Banner for a page. A missing source uses the configured data mode."""
+    if source is None:
+        source = _source_for_current_mode()
+    return source_banner(source, compact=compact)
+
+
+def _source_for_current_mode() -> dict:
+    from services.research import fallback_source
+
+    try:
+        from core.config import get_settings
+
+        source = fallback_source(get_settings().data_mode)
+    except Exception:
+        return {"mode": "unknown", "label": "", "ready": False, "stale": False}
+    if source.get("mode") == "mock":
+        return {**source, "ready": True}
+    return source
+
+
+def page_header(
+    title: str,
+    purpose: str,
+    meta: str = "",
+    accent: str = "",
+    source: dict | None = None,
+    *,
+    compact_source: bool = False,
+) -> None:
     inject_css()
     meta_html = f'<div class="meta">{_esc(meta)}</div>' if meta else ""
     rule = (
@@ -99,10 +160,7 @@ def page_header(title: str, purpose: str, meta: str = "", accent: str = "", sour
         if accent
         else ""
     )
-    if source is None:
-        banner = '<p class="mock-line">Mock data. Brokers are not connected. Nothing here is an instruction to trade.</p>'
-    else:
-        banner = source_banner(source)
+    banner = page_banner(source, compact=compact_source)
     show(
         f'{rule}<div class="page-head"><div><h1 class="page-title">{_esc(title)}</h1>'
         f'<p class="page-purpose">{_esc(purpose)}</p></div>{meta_html}</div>'
@@ -151,18 +209,6 @@ def risk_callout(level: str, title: str, detail: str, tone: str) -> None:
         f'<div class="callout { _esc(tone) }"><div class="sev">{_esc(level)}</div>'
         f"<h3>{_esc(title)}</h3><p>{_esc(detail)}</p></div>"
     )
-
-
-def timeline_block(items: list[dict]) -> None:
-    if not items:
-        empty_state("No stored timestamp for this event.")
-        return
-    rows = "".join(
-        f'<div class="stack-item"><p class="meta">{_esc(item.get("when"))}</p>'
-        f'<p class="prose">{_esc(item.get("text"))}</p></div>'
-        for item in items
-    )
-    show(rows)
 
 
 def market_event_card(event: dict) -> None:

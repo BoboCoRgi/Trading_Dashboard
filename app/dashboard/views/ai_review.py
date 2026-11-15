@@ -14,12 +14,14 @@ from app.dashboard.components import (
     placeholder_grid,
     section_header,
 )
-from app.dashboard.present import AGENT_CLASS
+from app.dashboard.present import AGENT_CLASS, two_places
 from app.dashboard.system_status import database_unavailable_message
 from app.dashboard.theme import BLUE, LAVENDER
 from core.config import get_settings
 from db.session import session_scope
+from services.portfolio_source import portfolio_provider
 from services.queries import ai_review
+from services.research import fallback_source
 
 _ROLE_TONE = {
     "analyst": "blue",
@@ -31,21 +33,29 @@ _ROLE_TONE = {
 
 
 def render() -> None:
+    mode_source = fallback_source(get_settings().data_mode)
+    try:
+        with session_scope() as session:
+            source = portfolio_provider().status(session)
+            view = ai_review(session)
+    except Exception:
+        page_header(
+            "AI review",
+            "How much the models are used, what that costs, and what is not measured yet.",
+            source=mode_source,
+        )
+        st.error(database_unavailable_message(get_settings().data_mode))
+        return
     page_header(
         "AI review",
         "How much the models are used, what that costs, and what is not measured yet.",
+        source=source,
     )
-    try:
-        with session_scope() as session:
-            view = ai_review(session)
-    except Exception:
-        st.error(database_unavailable_message(get_settings().data_mode))
-        return
 
     totals = view["totals"]
     runs = view["runs"]
     models = sorted({row["model"] for row in runs})
-    hero_number(f"${Decimal(totals['estimated_cost_usd']):,.4f}", "Estimated cost")
+    hero_number(f"${two_places(totals['estimated_cost_usd'])}", "Estimated cost")
     metric_strip(
         [
             {"value": str(totals["runs"]), "label": "Runs"},
@@ -106,7 +116,7 @@ def render() -> None:
                 "badge": row["role"].replace("_", " "),
                 "tone": _ROLE_TONE.get(AGENT_CLASS.get(row["role"], ""), "grey"),
                 "title": row["model"],
-                "meta": f"{row['time']} · {row['trigger'].replace('_', ' ').title()} · ${Decimal(row['estimated_cost_usd']):,.4f}",
+                "meta": f"{row['time']} · {row['trigger'].replace('_', ' ').title()} · ${two_places(row['estimated_cost_usd'])}",
             }
             for row in runs
         ]

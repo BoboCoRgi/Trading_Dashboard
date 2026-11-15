@@ -16,8 +16,6 @@ from analytics.outcomes import HORIZONS
 from analytics.screens import ScreenInput, screen
 from core.config import get_settings
 from core.enums import (
-    AIRole,
-    AnalysisTrigger,
     DataOrigin,
     DecisionType,
     EventAnalysisStatus,
@@ -33,7 +31,6 @@ from core.enums import (
 )
 from core.money import D, q2, q8
 from db.models import (
-    AIRun,
     Instrument,
     MarketEvent,
     OpportunityCandidate,
@@ -237,45 +234,6 @@ def promote_candidate(session: Session, candidate_id: str, decision_type: Decisi
         if event is not None and event.linked_decision_id is None:
             event.linked_decision_id = decision.id
     return decision
-
-
-def record_event_decision(session: Session, event_id: str, decision_type: DecisionType, reasoning: str):
-    event = session.get(MarketEvent, UUID(str(event_id)))
-    if event is None:
-        raise ValueError("unknown event")
-    if event.linked_decision_id is not None:
-        raise ValueError("this event already has a decision")
-    if not reasoning.strip():
-        raise ValueError("reasoning is required")
-    decision = create_decision(
-        session,
-        DecisionInput(
-            instrument_id=event.instrument_id,
-            decision_type=decision_type,
-            proposed_action=f"Record a {decision_type.value} from a market event.",
-            reasoning=reasoning.strip(),
-            what_i_thought=reasoning.strip(),
-        ),
-    )
-    event.linked_decision_id = decision.id
-    return decision
-
-
-def attach_event_analysis(session: Session, event_id: str) -> None:
-    event = session.get(MarketEvent, UUID(str(event_id)))
-    if event is None:
-        return
-    run = session.scalar(
-        select(AIRun)
-        .where(
-            AIRun.instrument_id == event.instrument_id,
-            AIRun.trigger == AnalysisTrigger.LARGE_PRICE_MOVE,
-            AIRun.role == AIRole.SYNTHESIS,
-        )
-        .order_by(AIRun.created_at.desc())
-    )
-    if run is not None:
-        event.linked_ai_run_id = run.id
 
 
 def _priority_rank(level: str) -> int:

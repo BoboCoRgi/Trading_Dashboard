@@ -1,4 +1,5 @@
 import base64
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import httpx
@@ -143,6 +144,64 @@ def test_logs_do_not_include_the_secret(caplog):
         _client(handler).get_positions()
     assert "test-secret" not in caplog.text
     assert "/equity/positions" in caplog.text
+
+
+def test_rate_limit_headers_are_kept_for_the_refresh_layer():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"currency": "GBP", "totalValue": 1},
+            headers={
+                "x-ratelimit-limit": "100",
+                "x-ratelimit-remaining": "7",
+                "x-ratelimit-reset": "1700000000",
+            },
+        )
+
+    client = _client(handler)
+    client.get_account_summary()
+    assert client.rate_limit.limit == 100
+    assert client.rate_limit.remaining == 7
+    assert client.rate_limit.reset_at == datetime.fromtimestamp(1700000000, tz=timezone.utc)
+
+
+def test_incremental_history_stops_at_the_first_known_id_without_another_page():
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["count"] += 1
+        return httpx.Response(
+            200,
+            json={
+                "items": [{"id": "new"}, {"id": "known"}],
+                "nextPagePath": "/api/v0/equity/history/orders?cursor=next",
+            },
+        )
+
+    client = _client(handler)
+    rows = client.get_historical_orders(known_ids={"known"}, identify=lambda item: str(item["id"]))
+    assert [row["id"] for row in rows] == ["new"]
+    assert calls["count"] == 1
+
+
+def test_incremental_history_reads_the_next_page_only_until_a_known_id():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.params.get("cursor") == "2":
+            return httpx.Response(
+                200,
+                json={
+                    "items": [{"id": "known"}, {"id": "older"}],
+                    "nextPagePath": "/api/v0/equity/history/orders?cursor=3",
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"items": [{"id": "new"}], "nextPagePath": "/api/v0/equity/history/orders?cursor=2"},
+        )
+
+    client = _client(handler)
+    rows = client.get_historical_orders(known_ids={"known"}, identify=lambda item: str(item["id"]))
+    assert [row["id"] for row in rows] == ["new"]
 
 
 def test_default_live_base_url_is_the_documented_host():

@@ -23,13 +23,26 @@ from core.enums import AnalysisTrigger, DecisionStatus, DecisionType
 from core.money import D
 from db.session import session_scope
 from services.decisions import DecisionInput, create_decision, update_decision
+from services.portfolio_source import portfolio_provider
 from services.queries import decision_detail, decision_list, form_choices
+from services.research import fallback_source
 from services.triggers import TriggerDispatcher
 
 _ROLES = ["ANALYST", "SKEPTIC", "RISK_OFFICER", "SYNTHESIS"]
 
 
+def decision_form_ready(choices: dict, existing: dict | None = None) -> bool:
+    symbols = [row.get("symbol") for row in choices.get("instruments") or [] if row.get("symbol")]
+    if not symbols:
+        return False
+    if existing is not None and existing.get("symbol") not in symbols:
+        return False
+    return True
+
+
 def _payload(choices: dict, prefix: str, existing: dict | None = None) -> DecisionInput | None:
+    if not decision_form_ready(choices, existing):
+        return None
     symbols = [row["symbol"] for row in choices["instruments"]]
     default_symbol = existing["symbol"] if existing else symbols[0]
     symbol = st.selectbox("Instrument", symbols, index=symbols.index(default_symbol), key=f"{prefix}-symbol")
@@ -109,14 +122,17 @@ def _impact(detail: dict, visuals: dict) -> None:
 
 
 def render() -> None:
-    page_header("Decisions", "What changed, and what happened afterwards.")
+    mode_source = fallback_source(get_settings().data_mode)
     try:
         with session_scope() as session:
+            source = portfolio_provider().status(session)
             rows = decision_list(session)
             choices = form_choices(session)
     except Exception:
+        page_header("Decisions", "What changed, and what happened afterwards.", source=mode_source)
         st.error(database_unavailable_message(get_settings().data_mode))
         return
+    page_header("Decisions", "What changed, and what happened afterwards.", source=source)
 
     detail = None
     if rows:
@@ -212,26 +228,31 @@ def render() -> None:
             )
 
     with st.expander("Add a decision"):
-        with st.form("add-decision"):
-            payload = _payload(choices, "add")
-            submitted = st.form_submit_button("Save decision")
-        if submitted:
-            if payload is None:
-                st.error("Proposed action and reasoning are required.")
-            else:
-                with session_scope() as session:
-                    create_decision(session, payload)
-                st.success("Decision stored. No order was sent.")
-                st.rerun()
+        if not decision_form_ready(choices):
+            empty_state("No instrument is available in this data mode yet.")
+        else:
+            with st.form("add-decision"):
+                payload = _payload(choices, "add")
+                submitted = st.form_submit_button("Save decision")
+            if submitted:
+                if payload is None:
+                    st.error("Proposed action and reasoning are required.")
+                else:
+                    with session_scope() as session:
+                        create_decision(session, payload)
+                    st.success("Decision stored. No order was sent.")
+                    st.rerun()
 
     with st.expander("Edit the open decision"):
-        if not rows:
+        if not detail:
             st.caption("Nothing to edit.")
+        elif not decision_form_ready(choices, detail):
+            empty_state("This decision stays as stored. Its instrument is not in the current form list.")
         else:
             with st.form("edit-decision"):
-                payload = _payload(choices, "edit", existing=detail if rows else None)
+                payload = _payload(choices, "edit", existing=detail)
                 submitted = st.form_submit_button("Update decision")
-            if submitted and payload is not None and detail:
+            if submitted and payload is not None:
                 with session_scope() as session:
                     update_decision(session, UUID(detail["id"]), payload)
                 st.success("Decision updated. The previous journal entry remains.")

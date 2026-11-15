@@ -5,7 +5,7 @@ and strings into something a person can scan.
 """
 
 import re
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 from core.config import get_settings
 
@@ -74,7 +74,7 @@ def _percent_fraction(raw: str) -> str:
         fraction = Decimal(raw)
     except InvalidOperation:
         return raw
-    return f"{(fraction * 100):.1f}%"
+    return f"{(fraction * 100):,.2f}%"
 
 
 def confidence_label(raw: str) -> str:
@@ -85,8 +85,8 @@ def confidence_label(raw: str) -> str:
     except InvalidOperation:
         return raw
     if value <= 1:
-        return f"{(value * 100):.0f}%"
-    return f"{value:.0f}%"
+        return f"{(value * 100):,.2f}%"
+    return f"{value:,.2f}%"
 
 
 def bar_width(weight_text: str) -> int:
@@ -108,18 +108,22 @@ def _ticker_from(message: str) -> str:
     return found.group(1) if found else ""
 
 
-def format_gbp(amount: float, *, decimals: int = 0) -> str:
+def two_places(value) -> str:
+    """Display rounding. Stored values stay exact."""
+    amount = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return f"{amount:,.2f}"
+
+
+def format_gbp(amount: float, *, decimals: int = 2) -> str:
     sign = "-" if amount < 0 else ""
     return f"{sign}£{abs(amount):,.{decimals}f}"
 
 
 def tidy_quantity(text: str) -> str:
     try:
-        value = Decimal(str(text))
+        return two_places(text)
     except InvalidOperation:
         return str(text)
-    rendered = format(value, "f").rstrip("0").rstrip(".")
-    return rendered or "0"
 
 
 def attention_items(view: dict) -> list[dict]:
@@ -141,11 +145,11 @@ def attention_items(view: dict) -> list[dict]:
             ticker = _ticker_from(detail)
             title = f"{ticker} concentration" if ticker else "Concentration"
             weight = summary.get("Largest weight", "")
-            threshold = f"{(Decimal(str(settings.concentration_top1_alert)) * 100):.0f}%"
+            threshold = f"{(Decimal(str(settings.concentration_top1_alert)) * 100):,.2f}%"
             detail = f"{weight} of the portfolio. Configured threshold {threshold}."
         elif code == "DRAWDOWN":
             seen_drawdown = True
-            limit = f"{(Decimal(str(settings.drawdown_alert)) * 100):.0f}%"
+            limit = f"{(Decimal(str(settings.drawdown_alert)) * 100):,.2f}%"
             detail = f"Current {summary.get('Drawdown from high', '—')}. Personal limit {limit}."
         elif code == "CASH":
             detail = f"Cash is {summary.get('Cash', '—')}."
@@ -165,7 +169,7 @@ def attention_items(view: dict) -> list[dict]:
                 "level": "WATCH",
                 "tone": "watch",
                 "title": "Drawdown approaching the limit",
-                "detail": f"Current {summary.get('Drawdown from high')}. Personal limit {limit:.0f}%.",
+                "detail": f"Current {summary.get('Drawdown from high')}. Personal limit {limit:,.2f}%.",
             }
         )
     if not items:

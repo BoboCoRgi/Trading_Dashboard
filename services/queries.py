@@ -152,7 +152,7 @@ def today_view(session: Session, provider: PortfolioDataProvider | None = None) 
                 "symbol": instrument.symbol,
                 "action": trade.action.value,
                 "quantity": str(trade.quantity),
-                "price": f"{trade.fill_price} {trade.trade_currency}",
+                "price": f"{q2(D(trade.fill_price)):,.2f} {trade.trade_currency}",
             }
             for trade, instrument, account in trades
         ],
@@ -237,7 +237,7 @@ def decision_detail(session: Session, decision_id: str) -> dict | None:
         "confidence": str(decision.user_confidence) if decision.user_confidence is not None else "—",
         "trade": None
         if trade is None
-        else f"{trade.action.value} {trade.quantity} @ {trade.fill_price} {trade.trade_currency}",
+        else f"{trade.action.value} {q2(D(trade.quantity)):,.2f} @ {q2(D(trade.fill_price)):,.2f} {trade.trade_currency}",
         "before": None
         if before is None
         else {
@@ -406,8 +406,11 @@ def research_view(session: Session) -> dict:
     }
 
 
-def ai_review(session: Session) -> dict:
-    runs = session.scalars(select(AIRun).order_by(AIRun.created_at.desc())).all()
+def ai_review(session: Session, instrument_id: UUID | str | None = None) -> dict:
+    statement = select(AIRun).order_by(AIRun.created_at.desc())
+    if instrument_id:
+        statement = statement.where(AIRun.instrument_id == UUID(str(instrument_id)))
+    runs = session.scalars(statement).all()
     total_cost = sum((D(run.estimated_cost_usd) for run in runs), start=D(0))
     total_in = sum(run.input_tokens for run in runs)
     total_out = sum(run.output_tokens for run in runs)
