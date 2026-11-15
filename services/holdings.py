@@ -23,7 +23,7 @@ from analytics.market_stats import (
 )
 from connectors.market_data.provider import StoredBenchmarks, StoredMarketData
 from core.enums import Broker, DataOrigin, TradeAction
-from core.money import D, q8
+from core.money import D, q2, q8
 from db.models import BrokerAccount, Decision, Instrument, PositionSnapshot, Thesis, Trade
 from services.ledger import snapshot_before
 from services.portfolio_source import PortfolioDataProvider, portfolio_provider
@@ -334,7 +334,7 @@ def _thesis(session: Session, instrument_id: str, origin: DataOrigin) -> dict | 
 
 def _freshness(as_of: datetime, position: CombinedPosition, daily_note: str, intraday_note: str) -> dict:
     moment = as_of.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if as_of.tzinfo else str(as_of)
-    price = "—" if position.price is None else f"{position.price} {position.price_currency}"
+    price = "—" if position.price is None else f"{q2(position.price):,.2f} {position.price_currency}"
     return {
         "snapshot": moment,
         "snapshot_price": price,

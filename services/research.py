@@ -103,7 +103,14 @@ def returns_from_closes(points: list[tuple[datetime, Decimal, str]]) -> dict:
     cutoff = _aware(last_time) - timedelta(days=30)
     prior = [item for item in ordered[:-1] if _aware(item[0]) <= cutoff]
     month = _change(last_price, prior[-1][1]) if prior else None
-    return {"price": D(last_price), "currency": currency or "", "day": day, "month": month}
+    return {
+        "price": D(last_price),
+        "currency": currency or "",
+        "day": day,
+        "month": month,
+        "price_kind": "eod_close",
+        "as_of": _aware(last_time),
+    }
 
 
 def event_timeline(events, catalysts) -> list[dict]:
@@ -210,6 +217,8 @@ def assemble_universe(
                 ),
                 "price": quote.get("price"),
                 "currency": quote.get("currency") or "",
+                "price_kind": quote.get("price_kind") or "",
+                "as_of": quote.get("as_of"),
                 "day_pct": quote.get("day"),
                 "month_pct": quote.get("month"),
                 "weight": row["weight"] if row["held"] else None,
@@ -294,6 +303,8 @@ def load_universe(session: Session, provider) -> list[dict]:
                 "currency": holding.get("currency") or "",
                 "day": holding.get("day"),
                 "month": None,
+                "price_kind": "broker_snapshot",
+                "as_of": None,
             }
         elif stored.get("day") is None and holding.get("day") is not None:
             stored["day"] = holding["day"]

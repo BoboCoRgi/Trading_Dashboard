@@ -1,3 +1,5 @@
+from datetime import timezone
+
 import streamlit as st
 
 from app.dashboard.charts import pnl_contribution_chart, show_chart
@@ -57,7 +59,12 @@ def render() -> None:
 
     page_header("Today", "What requires attention today.", meta=f"Snapshot {view['as_of']}", source=view.get("source"))
     market_pnl = None if not attribution.get("ready") else format_gbp(float(attribution["total_gbp"]))
-    portfolio_pulse(view, market_pnl=market_pnl)
+    _apply_daily(view, attribution)
+    portfolio_pulse(
+        view,
+        market_pnl=market_pnl,
+        today_hint=None if attribution.get("ready") else attribution.get("reason"),
+    )
     attention_block(view, setups)
     render_top_holdings()
 
@@ -66,9 +73,17 @@ def render() -> None:
         "Beginning-of-day shares versus the previous close, plus today's fills versus their execution price.",
     )
     if not attribution.get("ready"):
-        empty_state("Today's P&L attribution will appear once current prices and previous closes are available.")
+        empty_state(attribution.get("reason") or "Today's P&L attribution will appear once current prices and previous closes are available.")
     else:
         show_chart(pnl_contribution_chart(_chart_rows(attribution)))
+        if attribution.get("reason"):
+            st.caption(attribution["reason"])
+        elif attribution.get("as_of") is not None:
+            stamp = attribution["as_of"].astimezone(timezone.utc).strftime("%Y-%m-%d")
+            st.caption(
+                "Each figure is the last two stored daily closes, converted with the GBP rate stored on the broker position. "
+                f"Close as of {stamp}."
+            )
     section_header("Opportunity radar", "A screen of holdings and the watchlist. Not a recommendation.")
     if not radar:
         empty_state("No screen flag on the latest snapshot.")
@@ -114,6 +129,12 @@ def render() -> None:
                 st.info(f"{result.status}: {result.detail}")
         except Exception:
             st.error("AI analysis temporarily unavailable.")
+
+
+def _apply_daily(view: dict, attribution: dict) -> None:
+    by_symbol = {row["symbol"]: float(row["contribution_gbp"]) for row in attribution.get("rows") or []}
+    for position in view.get("positions") or []:
+        position["daily"] = by_symbol.get(position["symbol"])
 
 
 def _chart_rows(attribution: dict) -> list[dict]:

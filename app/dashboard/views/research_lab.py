@@ -1,5 +1,7 @@
 """Research workspace: watchlist, thesis, stored events, and the shared stock chart."""
 
+from datetime import datetime, timezone
+
 import streamlit as st
 
 from app.dashboard.components import ai_agent_panel, empty_state, page_header, section_header
@@ -102,7 +104,7 @@ def _watchlist(universe: list[dict], provider) -> None:
             " · ".join(
                 [
                     row["status"],
-                    _price(row["price"], row["currency"]),
+                    _marked_price(row),
                     f"1D {_change(row['day_pct'])}",
                     f"1M {_change(row['month_pct'])}",
                     f"Weight {_weight(row['weight'])}" if row["held"] else "Weight —",
@@ -337,6 +339,22 @@ def _show_thesis(thesis: dict) -> None:
 
 def _go(section: str) -> None:
     st.session_state["research_section_widget"] = section
+
+
+def _marked_price(row: dict) -> str:
+    price = _price(row.get("price"), row.get("currency") or "")
+    kind = row.get("price_kind") or ""
+    if price == "—":
+        return "No stored close"
+    if kind == "broker_snapshot":
+        return f"Broker snapshot {price}"
+    if kind == "eod_close":
+        moment = row.get("as_of")
+        if isinstance(moment, datetime):
+            stamp = moment.astimezone(timezone.utc).strftime("%Y-%m-%d")
+            return f"EOD close {price} as of {stamp}"
+        return f"EOD close {price}"
+    return price
 
 
 def _weight(value) -> str:

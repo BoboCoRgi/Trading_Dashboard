@@ -171,13 +171,16 @@ def today_view(session: Session, provider: PortfolioDataProvider | None = None) 
     }
 
 
-def decision_list(session: Session) -> list[dict]:
-    rows = session.execute(
+def decision_list(session: Session, origin: DataOrigin | None = None) -> list[dict]:
+    statement = (
         select(Decision, Instrument, Thesis)
         .join(Instrument, Instrument.id == Decision.instrument_id)
         .join(Thesis, Thesis.id == Decision.thesis_id, isouter=True)
         .order_by(Decision.created_at.desc())
-    ).all()
+    )
+    if origin is not None:
+        statement = statement.where(Decision.data_origin == origin)
+    rows = session.execute(statement).all()
     return [
         {
             "id": str(decision.id),
@@ -455,22 +458,36 @@ def ai_review(session: Session, instrument_id: UUID | str | None = None) -> dict
     }
 
 
-def form_choices(session: Session) -> dict:
-    instruments = session.scalars(
-        select(Instrument).where(Instrument.data_origin == DataOrigin.MOCK).order_by(Instrument.symbol)
+def form_choices(session: Session, origin: DataOrigin | None = None) -> dict:
+    """Instruments the current book can actually name: holdings and the watchlist.
+
+    Mock instruments are not offered while the dashboard is in live mode.
+    """
+    from services.portfolio_source import MockPortfolioProvider, LivePortfolioProvider, portfolio_provider
+    from services.research import load_universe
+
+    chosen = origin if origin is not None else portfolio_provider().origin
+    provider = LivePortfolioProvider() if chosen is DataOrigin.LIVE else MockPortfolioProvider()
+    if origin is None:
+        provider = portfolio_provider()
+    universe = load_universe(session, provider)
+    instruments = [
+        {"id": row["instrument_id"], "symbol": row["symbol"], "name": row.get("company") or row["symbol"]}
+        for row in universe
+        if row.get("instrument_id") and row.get("symbol")
+    ]
+    names = {UUID(row["id"]): row["symbol"] for row in instruments}
+    theses = session.scalars(
+        select(Thesis).where(Thesis.data_origin == chosen).order_by(Thesis.title)
     ).all()
-    names = {row.id: row.symbol for row in instruments}
-    theses = session.scalars(select(Thesis).order_by(Thesis.title)).all()
     trades = session.execute(
         select(Trade, Instrument)
         .join(Instrument, Instrument.id == Trade.instrument_id)
-        .where(Trade.data_origin == DataOrigin.MOCK)
+        .where(Trade.data_origin == chosen)
         .order_by(Trade.executed_at.desc())
     ).all()
     return {
-        "instruments": [
-            {"id": str(row.id), "symbol": row.symbol, "name": row.company_name} for row in instruments
-        ],
+        "instruments": instruments,
         "theses": [
             {"id": str(row.id), "instrument_id": str(row.instrument_id), "symbol": names.get(row.instrument_id, ""), "title": row.title}
             for row in theses

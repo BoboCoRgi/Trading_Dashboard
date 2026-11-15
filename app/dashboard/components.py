@@ -672,10 +672,10 @@ def _model_label(model: object) -> str:
     return "—" if not model else str(model)
 
 
-def portfolio_pulse(view: dict, *, market_pnl: str | None = None) -> None:
+def portfolio_pulse(view: dict, *, market_pnl: str | None = None, today_hint: str | None = None) -> None:
     summary = summary_map(view["summary"])
     if market_pnl is None:
-        today = {"value": "—", "label": "Today", "hint": "Needs current prices and previous closes", "tone": ""}
+        today = {"value": "—", "label": "Today", "hint": today_hint or "Needs current prices and previous closes", "tone": ""}
     else:
         today = {"value": market_pnl, "label": "Today", "hint": "Market P&L versus the previous close", "tone": tone_for_signed(market_pnl, gains=True)}
     hero_number(summary.get("Portfolio value", "—"), "Total portfolio")

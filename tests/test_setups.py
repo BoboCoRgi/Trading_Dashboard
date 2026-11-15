@@ -123,6 +123,34 @@ def test_a_later_candle_does_not_change_an_earlier_signal():
     ]
 
 
+def test_a_support_bounce_leaves_the_active_list_on_the_next_candle():
+    history = _pivots()
+    support = _support(history)
+    bounce = _append(
+        history,
+        open_=support.low + D("0.2"),
+        high=support.high + D("1"),
+        low=support.low + D("0.05"),
+        close=support.high + D("0.4"),
+        volume=D("100"),
+    )
+    fresh = replay(bounce, symbol="RKLB", timeframe="5m", rules=RULES)
+    assert any(signal.setup_type == "SUPPORT_BOUNCE" and signal.status == CONFIRMED for signal in fresh.active)
+    later = bounce + [
+        _candle(
+            bounce[-1].start + timedelta(days=1),
+            support.high + D("1"),
+            support.high + D("1.4"),
+            support.high + D("0.2"),
+            support.high + D("1"),
+            D("100"),
+        )
+    ]
+    aged = replay(later, symbol="RKLB", timeframe="5m", rules=RULES)
+    assert all(signal.setup_type != "SUPPORT_BOUNCE" for signal in aged.active)
+    assert any(signal.setup_type == "SUPPORT_BOUNCE" and signal.status == CONFIRMED for signal in aged.invalidated)
+
+
 def test_replay_keeps_a_setup_until_a_later_candle_invalidates_it():
     warning = _break_support()
     support = _support(_pivots())

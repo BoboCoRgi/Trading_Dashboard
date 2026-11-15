@@ -5,12 +5,12 @@ drops an unfinished candle, and records lifecycle changes.
 """
 
 from datetime import datetime, timedelta, timezone
-from uuid import UUID, uuid4
+from uuid import UUID, uuid5
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from analytics.market_stats import MarketBar
+from analytics.market_stats import NEW_YORK, MarketBar
 from analytics.setups import (
     CONFIRMED,
     INVALIDATED,
@@ -29,6 +29,8 @@ from db.models import TechnicalSetup
 from services.market_data import SqlBarCache, bar_status
 from services.research import load_universe
 
+_SETUP_NAMESPACE = UUID("6f9c2a1e-7b34-4c1a-9e2d-0a5b8c7d6e11")
+_INTRADAY = {"5m", "15m", "1H"}
 _LABELS = {
     "BREAKOUT_WATCH": "Breakout watch",
     "CONFIRMED_BREAKOUT": "Confirmed breakout",
@@ -63,31 +65,58 @@ def refresh_setups(session: Session, provider, *, now: datetime | None = None, t
     return attention_setups(session, provider.origin)
 
 
-def sync_displayed_bars(
-    session: Session,
+def observe_displayed_bars(
     *,
-    instrument_id: str,
     symbol: str,
     timeframe: str,
     bars: list[PriceBar],
-    origin: DataOrigin,
     now: datetime | None = None,
 ) -> list[dict]:
-    if origin is DataOrigin.MOCK:
-        return []
+    """Detect setups on the candles already loaded. This does not write."""
     moment = now or datetime.now(timezone.utc)
-    _sync(session, instrument_id, symbol, timeframe, bars, origin, moment)
-    return instrument_setups(session, instrument_id, origin, timeframe)
+    detected = _detect(symbol, timeframe, bars, moment)
+    if detected is None:
+        return []
+    quality, result = detected
+    shown = [_from_signal(signal, quality, active=True) for signal in result.active]
+    shown.extend(_from_signal(signal, quality, active=False) for signal in result.invalidated)
+    return shown
 
 
-def attention_setups(session: Session, origin: DataOrigin, *, limit: int = 5) -> list[dict]:
+def attention_setups(session: Session, origin: DataOrigin, *, limit: int = 5, now: datetime | None = None) -> list[dict]:
     rows = session.scalars(
         select(TechnicalSetup)
         .where(TechnicalSetup.data_origin == origin, TechnicalSetup.current.is_(True), TechnicalSetup.status != INVALIDATED)
         .order_by(TechnicalSetup.candle_time.desc())
     ).all()
-    ranked = sorted(rows, key=lambda row: (_ORDER.get(row.status, 9), row.symbol))
-    return [_public(row) for row in ranked[:limit]]
+    return [_public(row) for row in choose_attention(rows, now or datetime.now(timezone.utc), limit=limit)]
+
+
+def choose_attention(rows: list, now: datetime, *, limit: int = 5) -> list:
+    """Daily warnings stay ahead of intraday notes. Old intraday candles stay off Today."""
+    session_day = _session_date(now)
+    daily = []
+    newest: dict[str, object] = {}
+    for row in rows:
+        if not getattr(row, "current", False) or row.status == INVALIDATED:
+            continue
+        if row.timeframe in _INTRADAY:
+            if _local_date(row.candle_time) != session_day:
+                continue
+            kept = newest.get(row.symbol)
+            if kept is None or _stamp(row.candle_time) > _stamp(kept.candle_time):
+                newest[row.symbol] = row
+            continue
+        daily.append(row)
+    daily.sort(key=lambda row: (_ORDER.get(row.status, 9), row.symbol, -_stamp(row.candle_time)))
+    intraday = sorted(newest.values(), key=lambda row: (_ORDER.get(row.status, 9), row.symbol))
+    return [*daily, *intraday][:limit]
+
+
+def setup_id(instrument_id: str, timeframe: str, structure_key: str, candle_time: datetime, origin: DataOrigin) -> UUID:
+    """Same candle and structure always get the same id. A later candle is a different row."""
+    stamp = candle_time.isoformat() if candle_time.tzinfo else candle_time.replace(tzinfo=timezone.utc).isoformat()
+    return uuid5(_SETUP_NAMESPACE, f"{instrument_id}|{timeframe}|{structure_key}|{stamp}|{origin.value}")
 
 
 def instrument_setups(session: Session, instrument_id: str, origin: DataOrigin, timeframe: str) -> list[dict]:
@@ -104,6 +133,14 @@ def instrument_setups(session: Session, instrument_id: str, origin: DataOrigin, 
 
 
 def _sync(session, instrument_id, symbol, timeframe, bars, origin, now) -> None:
+    detected = _detect(symbol, timeframe, bars, now)
+    if detected is None:
+        return
+    quality, result = detected
+    _persist(session, instrument_id, timeframe, origin, quality, now, result)
+
+
+def _detect(symbol: str, timeframe: str, bars: list[PriceBar], now: datetime):
     usable = [bar for bar in bars if _usable_source(bar)]
     usable.sort(key=lambda bar: bar.timestamp)
     market = [_market(bar) for bar in usable]
@@ -112,12 +149,11 @@ def _sync(session, instrument_id, symbol, timeframe, bars, origin, now) -> None:
         usable = usable[: len(completed)]
     quality = bar_status(usable, _interval(timeframe), now) if usable else "UNKNOWN"
     if not completed or not quality_allows(quality):
-        return
+        return None
     rules = rules_from_settings()
     if len(completed) < rules.min_bars:
-        return
-    result = replay(completed, symbol=symbol, timeframe=timeframe, rules=rules)
-    _persist(session, instrument_id, timeframe, origin, quality, now, result)
+        return None
+    return quality, replay(completed, symbol=symbol, timeframe=timeframe, rules=rules)
 
 
 def _persist(session, instrument_id, timeframe, origin, quality, now, result: AdvanceResult) -> None:
@@ -144,7 +180,9 @@ def _persist(session, instrument_id, timeframe, origin, quality, now, result: Ad
     for signal in result.active:
         if signal.structure_key in closed_keys:
             continue
-        row = live.get(signal.structure_key)
+        row = live.get(signal.structure_key) or session.get(
+            TechnicalSetup, setup_id(str(instrument_id), timeframe, signal.structure_key, signal.candle_time, origin)
+        )
         if row is None:
             session.add(_row(instrument_id, timeframe, origin, quality, now, signal, current=True))
             continue
@@ -169,7 +207,7 @@ def _apply(row: TechnicalSetup, signal: SetupSignal, quality: str, now: datetime
 
 def _row(instrument_id, timeframe, origin, quality, now, signal: SetupSignal, *, current: bool) -> TechnicalSetup:
     return TechnicalSetup(
-        id=uuid4(),
+        id=setup_id(str(instrument_id), timeframe, signal.structure_key, signal.candle_time, origin),
         instrument_id=UUID(str(instrument_id)),
         symbol=signal.symbol,
         timeframe=timeframe,
@@ -209,6 +247,43 @@ def _public(row: TechnicalSetup) -> dict:
         "data_status": row.data_status,
         "active": bool(row.current) and row.status != INVALIDATED,
     }
+
+
+def _from_signal(signal: SetupSignal, quality: str, *, active: bool) -> dict:
+    level = signal.level_high if signal.level_high is not None else signal.level_low
+    return {
+        "id": "",
+        "instrument_id": "",
+        "symbol": signal.symbol,
+        "timeframe": signal.timeframe,
+        "setup_type": signal.setup_type,
+        "label": _LABELS.get(signal.setup_type, signal.setup_type),
+        "status": signal.status,
+        "candle_time": signal.candle_time,
+        "level": None if level is None else str(level),
+        "evidence": signal.evidence,
+        "invalidation": signal.invalidation,
+        "data_status": quality,
+        "active": active and signal.status != INVALIDATED,
+    }
+
+
+def _session_date(now: datetime):
+    local = (now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)).astimezone(NEW_YORK)
+    day = local.date()
+    while day.weekday() >= 5:
+        day -= timedelta(days=1)
+    return day
+
+
+def _local_date(value: datetime):
+    moment = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return moment.astimezone(NEW_YORK).date()
+
+
+def _stamp(value: datetime) -> float:
+    moment = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return moment.timestamp()
 
 
 def _names(session, provider) -> list[tuple[str, str]]:

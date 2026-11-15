@@ -165,6 +165,10 @@ def advance(active: list[SetupSignal], bars: list[MarketBar], *, symbol: str, ti
     for signal in active:
         if signal.setup_type == VOLUME_SPIKE and signal.candle_time != latest.start:
             continue
+        if signal.setup_type == SUPPORT_BOUNCE and signal.candle_time != latest.start:
+            if _is_invalid(signal, bars, index, rules):
+                invalidated.append(replace(signal, status=INVALIDATED, candle_time=latest.start, close=latest.close))
+            continue
         if _is_invalid(signal, bars, index, rules):
             invalidated.append(replace(signal, status=INVALIDATED, candle_time=latest.start, close=latest.close))
             continue

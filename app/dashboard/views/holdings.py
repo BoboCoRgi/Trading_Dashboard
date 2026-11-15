@@ -73,6 +73,7 @@ def _book(report: dict) -> None:
         rows = [_combined_row(row) for row in report["combined"]]
     section_header("Positions", "Average cost is the broker average in the trading currency.")
     _positions_table(rows)
+    st.caption("Broker price is the position feed stored with the snapshot. It is not the Twelve Data close used on the chart.")
     settings = get_settings()
     weights = [
         {
@@ -166,6 +167,7 @@ def _detail(detail: dict) -> None:
             ]
             if vwap_on and window == "INTRADAY" and detail["vwap"]["value"] is not None:
                 lines.append({"name": "VWAP", "price": float(detail["vwap"]["value"])})
+            st.caption("Chart closes are stored market bars. Broker price in the table above can differ.")
             show_chart(
                 price_volume_chart(
                     chart_bars,
@@ -289,7 +291,7 @@ def _in_span(trade: dict, bars) -> bool:
 
 
 def _positions_table(rows: list[list[str]]) -> None:
-    headers = ["Ticker", "Quantity", "Avg cost", "Price", "Value", "P&L", "Weight"]
+    headers = ["Ticker", "Quantity", "Avg cost", "Broker price", "Value", "P&L", "Weight"]
     if not rows:
         empty_state("Nothing to compare.")
         return

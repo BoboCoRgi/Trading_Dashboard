@@ -19,7 +19,7 @@ from app.dashboard.present import DECISION_TONE, confidence_label, format_gbp
 from app.dashboard.system_status import database_unavailable_message
 from app.dashboard.series import decision_chart_data
 from core.config import get_settings
-from core.enums import AnalysisTrigger, DecisionStatus, DecisionType
+from core.enums import AnalysisTrigger, DataOrigin, DecisionStatus, DecisionType
 from core.money import D
 from db.session import session_scope
 from services.decisions import DecisionInput, create_decision, update_decision
@@ -41,7 +41,7 @@ def decision_form_ready(choices: dict, existing: dict | None = None) -> bool:
     return True
 
 
-def _payload(choices: dict, prefix: str, existing: dict | None = None) -> DecisionInput | None:
+def _payload(choices: dict, prefix: str, existing: dict | None = None, *, origin: DataOrigin) -> DecisionInput | None:
     if not decision_form_ready(choices, existing):
         return None
     symbols = [row["symbol"] for row in choices["instruments"]]
@@ -99,6 +99,7 @@ def _payload(choices: dict, prefix: str, existing: dict | None = None) -> Decisi
         what_i_expected=expected,
         what_would_prove_me_wrong=invalidation,
         status=DecisionStatus(status),
+        data_origin=origin,
     )
 
 
@@ -126,9 +127,10 @@ def render() -> None:
     mode_source = fallback_source(get_settings().data_mode)
     try:
         with session_scope() as session:
-            source = portfolio_provider().status(session)
-            rows = decision_list(session)
-            choices = form_choices(session)
+            provider = portfolio_provider()
+            source = provider.status(session)
+            rows = decision_list(session, provider.origin)
+            choices = form_choices(session, provider.origin)
     except Exception:
         page_header("Decisions", "What changed, and what happened afterwards.", source=mode_source)
         st.error(database_unavailable_message(get_settings().data_mode))
@@ -234,7 +236,7 @@ def render() -> None:
             empty_state("No instrument is available in this data mode yet.")
         else:
             with st.form("add-decision"):
-                payload = _payload(choices, "add")
+                payload = _payload(choices, "add", origin=portfolio_provider().origin)
                 submitted = st.form_submit_button("Save decision")
             if submitted:
                 if payload is None:
@@ -252,7 +254,7 @@ def render() -> None:
             empty_state("This decision stays as stored. Its instrument is not in the current form list.")
         else:
             with st.form("edit-decision"):
-                payload = _payload(choices, "edit", existing=detail)
+                payload = _payload(choices, "edit", existing=detail, origin=portfolio_provider().origin)
                 submitted = st.form_submit_button("Update decision")
             if submitted and payload is not None:
                 with session_scope() as session:

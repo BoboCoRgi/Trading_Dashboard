@@ -77,7 +77,7 @@ def _card(card: HoldingCard) -> None:
     show(
         f'<div class="holding-card"><p class="holding-symbol">{_text(card.symbol)}</p>'
         f'<p class="holding-company">{_text(card.company)}</p>'
-        f'<p class="holding-meta">Portfolio weight {weight}<br>Latest price {price}<br>'
+        f'<p class="holding-meta">Portfolio weight {weight}<br>EOD close {price}{_bar_as_of(card)}<br>'
         f"Selected-range return {change}</p></div>"
     )
     if card.message or not card.bars:
@@ -106,6 +106,16 @@ def _card(card: HoldingCard) -> None:
     page = st.session_state.get("holding_page")
     if page is not None:
         st.page_link(page, label="Open analysis", query_params={"instrument": card.instrument_id})
+
+
+def _bar_as_of(card: HoldingCard) -> str:
+    if not card.bars:
+        return ""
+    moment = card.bars[-1].timestamp
+    if not hasattr(moment, "astimezone"):
+        return ""
+    stamp = moment.astimezone(timezone.utc).strftime("%Y-%m-%d")
+    return f" as of {stamp}"
 
 
 def _bar(bar) -> dict:

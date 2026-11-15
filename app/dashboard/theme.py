@@ -36,6 +36,18 @@ TONES = {
 def stylesheet() -> str:
     return f"""
     <style>
+    header[data-testid="stHeader"] {{
+      height: 0 !important;
+      min-height: 0 !important;
+      background: transparent !important;
+      pointer-events: none !important;
+    }}
+    [data-testid="stToolbar"],
+    [data-testid="stDecoration"],
+    #MainMenu {{
+      display: none !important;
+      pointer-events: none !important;
+    }}
     .stApp {{
       background: {PAPER};
       color: {INK};
@@ -482,7 +494,10 @@ def stylesheet() -> str:
       }}
       .trd-menu {{
         display: inline-flex;
-        margin: 0 0 12px;
+        position: sticky;
+        top: 8px;
+        z-index: 1000005;
+        margin: 8px 0 12px;
       }}
     }}
     </style>

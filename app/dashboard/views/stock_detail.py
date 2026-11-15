@@ -27,7 +27,7 @@ from services.holdings import holdings_report
 from services.market_data import bar_status, build_market_data_service
 from services.portfolio_source import portfolio_provider
 from services.research import fallback_source
-from services.setups import sync_displayed_bars
+from services.setups import observe_displayed_bars
 from services.trade_plans import chart_plans
 from services.top_holdings import (
     chart_average_cost,
@@ -123,23 +123,10 @@ def render_instrument(instrument_id: str, *, embedded: bool = False, source: dic
                 currency=currency,
             )
             markers = load_timeline(session, identity, provider.origin)
-            chart_setups = []
             try:
                 chart_plans_rows = chart_plans(session, str(identity), provider.origin)
             except Exception:
                 chart_plans_rows = []
-            if series.status == "ready" and series.bars:
-                try:
-                    chart_setups = sync_displayed_bars(
-                        session,
-                        instrument_id=identity,
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        bars=series.bars,
-                        origin=provider.origin,
-                    )
-                except Exception:
-                    chart_setups = []
             session.commit()
     except Exception:
         if embedded:
@@ -148,8 +135,11 @@ def render_instrument(instrument_id: str, *, embedded: bool = False, source: dic
             page_header(symbol, company, source=header_source)
         empty_state("Price history temporarily unavailable.")
         return
+    chart_setups = []
+    if series.status == "ready" and series.bars:
+        chart_setups = observe_displayed_bars(symbol=symbol, timeframe=timeframe, bars=series.bars)
 
-    _header(position, series, header_source, symbol=symbol, company=company, embedded=embedded)
+    _header(position, series, header_source, symbol=symbol, company=company, embedded=embedded, timeframe=timeframe)
     controls = st.columns(2)
     controls[0].segmented_control("Timeframe", TIMEFRAMES, key=frame_key)
     controls[1].segmented_control("Range", HISTORY, key=range_key)
@@ -171,7 +161,7 @@ def render_instrument(instrument_id: str, *, embedded: bool = False, source: dic
     )
 
 
-def _header(position, series, source, *, symbol: str, company: str, embedded: bool) -> None:
+def _header(position, series, source, *, symbol: str, company: str, embedded: bool, timeframe: str) -> None:
     latest = series.bars[-1].close if series.bars else None
     currency = series.bars[-1].currency if series.bars else (position.price_currency if position is not None else "")
     if embedded:
@@ -193,6 +183,12 @@ def _header(position, series, source, *, symbol: str, company: str, embedded: bo
     cost_text = _price(cost, currency) if cost is not None else "Not drawn. The stored average is in another currency."
     pnl = "—" if position.unrealised_gbp is None else format_gbp(float(position.unrealised_gbp))
     st.caption(f"Average cost {cost_text}. Unrealised P&L {pnl}. Position value is GBP. The chart axis is {currency or 'the trading currency'}.")
+    bar_as_of = series.bars[-1].timestamp.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if series.bars else "—"
+    broker = "—" if position.price is None else _price(position.price, position.price_currency)
+    st.caption(
+        f"Chart close is the stored {timeframe} bar as of {bar_as_of}. "
+        f"Broker snapshot {broker} is a different price and is not drawn as the close."
+    )
 
 
 def _toggles(prefix: str, identity: str, timeframe: str, intraday: bool) -> dict[str, bool]:
