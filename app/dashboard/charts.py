@@ -146,12 +146,26 @@ def relative_performance_chart(series: list[dict]) -> go.Figure:
     return fig
 
 
-def show_chart(fig: go.Figure) -> None:
+def equity_chart(points: list[dict]) -> go.Figure:
+    times = [point["time"] for point in points]
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True, row_heights=[0.68, 0.32], vertical_spacing=0.08)
+    fig.add_trace(go.Scatter(x=times, y=[float(point["equity"]) for point in points], mode="lines", line={"color": BLUE, "width": 2}, name="Equity"), row=1, col=1)
+    fig.add_trace(go.Scatter(x=times, y=[float(point["drawdown"]) for point in points], mode="lines", line={"color": CORAL, "width": 2}, name="Drawdown %"), row=2, col=1)
+    fig.update_yaxes(title_text="Equity", row=1, col=1)
+    fig.update_yaxes(title_text="Drawdown %", row=2, col=1)
+    return _layout(fig, 460)
+
+
+def show_chart(fig: go.Figure, *, interactive: bool = False) -> None:
+    config = {"displayModeBar": interactive, "responsive": True}
+    if interactive:
+        config["scrollZoom"] = True
+        config["modeBarButtonsToRemove"] = ["lasso2d", "select2d"]
     st.plotly_chart(
         fig,
         width="stretch",
         theme=None,
-        config={"displayModeBar": False, "responsive": True},
+        config=config,
     )
 
 
@@ -543,6 +557,7 @@ def price_volume_chart(
     markers: list[dict] | None = None,
     zones: list[dict] | None = None,
     volume_average: list[float | None] | None = None,
+    levels: list[dict] | None = None,
     height: int | None = None,
 ) -> go.Figure:
     """Price and, when present, bar volume on one time axis.
@@ -628,6 +643,16 @@ def price_volume_chart(
         )
     _add_markers(fig, markers or [], row=1, col=1)
     _add_zones(fig, zones or [], times)
+    for level in levels or []:
+        fig.add_hline(
+            y=level["price"],
+            line_dash="dash",
+            line_color=level.get("color") or MUTED,
+            annotation_text=level["name"],
+            annotation_position="right",
+            row=1,
+            col=1,
+        )
     for line in cost_lines:
         fig.add_hline(
             y=line["price"],
@@ -717,10 +742,11 @@ def stock_detail_chart(
     zones: list[dict],
     show_volume: bool,
     volume_average: list[float | None] | None = None,
+    levels: list[dict] | None = None,
 ) -> go.Figure:
-    return price_volume_chart(
+    fig = price_volume_chart(
         bars,
-        style="line",
+        style="candle",
         trades=[],
         cost_lines=cost_lines,
         averages=averages,
@@ -728,8 +754,13 @@ def stock_detail_chart(
         markers=markers,
         zones=zones,
         volume_average=volume_average,
+        levels=levels,
         height=560 if show_volume else 420,
     )
+    fig.update_layout(hovermode="x")
+    fig.update_xaxes(showspikes=True, spikemode="across", spikesnap="cursor", spikecolor=MUTED, spikethickness=1)
+    fig.update_yaxes(showspikes=True, spikemode="across", spikesnap="cursor", spikecolor=MUTED, spikethickness=1)
+    return fig
 
 
 def _hover_time(value) -> str:

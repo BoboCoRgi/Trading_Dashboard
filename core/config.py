@@ -63,6 +63,12 @@ class Settings(BaseSettings):
     market_data_provider: str = "twelvedata"
     twelve_data_api_key: str = ""
 
+    # Fractions, not percents. Relative volume is a ratio, so 1.5 means 150% of the baseline.
+    setup_approach_fraction: Decimal = Field(default=Decimal("0.01"))
+    setup_breakout_rvol: Decimal = Field(default=Decimal("1.5"))
+    setup_volume_spike_rvol: Decimal = Field(default=Decimal("2"))
+    setup_pullback_fraction: Decimal = Field(default=Decimal("0.015"))
+
     @field_validator(
         "concentration_top1_alert",
         "drawdown_alert",
@@ -74,6 +80,10 @@ class Settings(BaseSettings):
         "move_critical_impact",
         "screen_drawdown",
         "screen_peer_gap",
+        "setup_approach_fraction",
+        "setup_breakout_rvol",
+        "setup_volume_spike_rvol",
+        "setup_pullback_fraction",
         mode="before",
     )
     @classmethod

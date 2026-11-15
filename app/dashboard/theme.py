@@ -459,7 +459,8 @@ def stylesheet() -> str:
       .page-head {{ flex-direction: column; align-items: flex-start; }}
       .hero-value {{ font-size: 34px; }}
       .page-title {{ font-size: 30px; }}
-      div[data-testid="stHorizontalBlock"]:has(.holding-card) {{
+      div[data-testid="stHorizontalBlock"]:has(.holding-card),
+      div[data-testid="stHorizontalBlock"]:has(.tech-panel) {{
         flex-direction: column !important;
       }}
       [data-testid="stSidebar"] {{

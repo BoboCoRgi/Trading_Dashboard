@@ -31,6 +31,7 @@ from services.research import (
     thesis_for,
 )
 from services.triggers import TriggerDispatcher
+from app.dashboard.views.strategy_lab import render_strategy_lab
 
 
 def render() -> None:
@@ -43,7 +44,7 @@ def render() -> None:
     except Exception:
         page_header(
             "Research lab",
-            "Watchlist, the thesis, known events, and one name in detail.",
+            "Watchlist, the thesis, known events, one name, and a cached-candle backtest.",
             accent=LAVENDER,
             source=fallback_source(settings.data_mode),
         )
@@ -51,7 +52,7 @@ def render() -> None:
         return
     page_header(
         "Research lab",
-        "Watchlist, the thesis, known events, and one name in detail.",
+        "Watchlist, the thesis, known events, one name, and a cached-candle backtest.",
         accent=LAVENDER,
         source=source,
     )
@@ -67,6 +68,8 @@ def render() -> None:
         _events(universe)
     elif section == "Deep Dive":
         _dive(universe, source, provider)
+    elif section == "Strategy Lab":
+        render_strategy_lab(universe, provider)
     else:
         _watchlist(universe, provider)
 

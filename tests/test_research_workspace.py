@@ -54,8 +54,8 @@ from services.research import (
 )
 
 
-def test_sections_are_the_four_workspace_tabs():
-    assert SECTIONS == ("Watchlist", "Theses", "Catalysts & Events", "Deep Dive")
+def test_sections_include_the_strategy_lab():
+    assert SECTIONS == ("Watchlist", "Theses", "Catalysts & Events", "Deep Dive", "Strategy Lab")
 
 
 def test_current_holding_appears_once_and_keeps_its_instrument_id():

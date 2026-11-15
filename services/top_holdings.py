@@ -29,9 +29,11 @@ from analytics.timeline import (
     trade_marker,
 )
 from connectors.market_data.bars import PriceBar
-from core.enums import DataOrigin, TradeAction
+from core.enums import Broker, DataOrigin, TradeAction
 from core.money import D, q8
-from db.models import Decision, MarketEvent, Trade
+from db.models import BrokerAccount, Decision, MarketEvent, Trade
+
+_BROKER_LABELS = {Broker.TRADING212: "Trading 212", Broker.IBKR: "IBKR"}
 from services.market_data import SeriesResult
 
 _CARD_MESSAGE = "Price history temporarily unavailable."
@@ -188,12 +190,13 @@ def daily_rvol(bars: list[PriceBar]) -> Decimal | None:
 def load_timeline(session: Session, instrument_id: str, origin: DataOrigin) -> list[TimelineMarker]:
     instrument = UUID(str(instrument_id))
     markers: list[TimelineMarker] = []
-    trades = session.scalars(
-        select(Trade)
+    trades = session.execute(
+        select(Trade, BrokerAccount.broker)
+        .join(BrokerAccount, BrokerAccount.id == Trade.account_id)
         .where(Trade.instrument_id == instrument, Trade.data_origin == origin)
         .order_by(Trade.executed_at)
     ).all()
-    for trade in trades:
+    for trade, broker in trades:
         if trade.action not in {TradeAction.BUY, TradeAction.SELL}:
             continue
         if trade.executed_at is None or trade.executed_at.tzinfo is None:
@@ -207,6 +210,7 @@ def load_timeline(session: Session, instrument_id: str, origin: DataOrigin) -> l
                 quantity=D(trade.quantity),
                 price=D(trade.fill_price),
                 currency=trade.trade_currency,
+                broker=_BROKER_LABELS.get(broker, getattr(broker, "value", str(broker))),
             )
         )
     decisions = session.scalars(

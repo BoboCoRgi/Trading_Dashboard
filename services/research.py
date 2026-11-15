@@ -32,7 +32,7 @@ from db.models import (
 )
 from services.holdings import holdings_report
 
-SECTIONS = ("Watchlist", "Theses", "Catalysts & Events", "Deep Dive")
+SECTIONS = ("Watchlist", "Theses", "Catalysts & Events", "Deep Dive", "Strategy Lab")
 EMPTY_THESIS = "No thesis yet. Add one to track what would make you change your view."
 EMPTY_EVENTS = "No stored event for this name yet. Earnings, guidance, and other dates appear here only after they are recorded."
 THESIS_STATUSES = ("ACTIVE", "WATCH", "BROKEN", "CLOSED")

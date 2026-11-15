@@ -25,6 +25,7 @@ from services.attribution import load_today_attribution
 from services.portfolio_source import portfolio_provider
 from services.queries import today_view
 from services.research import fallback_source
+from services.setups import refresh_setups
 from services.scan import promote_candidate, radar_cards, refresh_scan
 from services.ai_reuse import should_invoke_model
 from services.triggers import TriggerDispatcher
@@ -40,6 +41,11 @@ def render() -> None:
                 refresh_scan(session)
             attribution = load_today_attribution(session, provider) if view.get("ready") else {"ready": False, "rows": []}
             radar = radar_cards(session, origin=origin) if origin is not None else []
+            setups = []
+            try:
+                setups = refresh_setups(session, provider) if origin is not None else []
+            except Exception:
+                setups = []
     except Exception:
         page_header("Today", "What requires attention today.", source=fallback_source(get_settings().data_mode))
         st.error(database_unavailable_message(get_settings().data_mode))
@@ -52,7 +58,7 @@ def render() -> None:
     page_header("Today", "What requires attention today.", meta=f"Snapshot {view['as_of']}", source=view.get("source"))
     market_pnl = None if not attribution.get("ready") else format_gbp(float(attribution["total_gbp"]))
     portfolio_pulse(view, market_pnl=market_pnl)
-    attention_block(view)
+    attention_block(view, setups)
     render_top_holdings()
 
     section_header(

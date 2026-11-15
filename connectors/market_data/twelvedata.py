@@ -13,7 +13,7 @@ import httpx
 from connectors.market_data.bars import PriceBar
 from core.money import D
 
-_PROVIDER_INTERVAL = {"5min": "5min", "1h": "1h", "1D": "1day"}
+_PROVIDER_INTERVAL = {"5min": "5min", "15min": "15min", "1h": "1h", "1D": "1day", "1W": "1week"}
 _SOURCE = "twelvedata"
 
 

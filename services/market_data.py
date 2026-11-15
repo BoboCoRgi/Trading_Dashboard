@@ -11,15 +11,27 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from analytics.chart_ranges import interval_for, window_for
+from analytics.chart_ranges import history_window, interval_for, timeframe_interval, window_for
+from analytics.resample import resample_bars, resample_source
 from connectors.market_data.bars import PriceBar, bar_identity, upsert_bars
 from connectors.market_data.twelvedata import MarketDataError, TwelveDataProvider
 from core.config import get_settings
 from core.enums import DataOrigin
 from db.models import MarketPriceBar
 
-_STEP = {"5min": timedelta(minutes=5), "1h": timedelta(hours=1), "1D": timedelta(days=1)}
-_GRACE = {"5min": timedelta(minutes=15), "1h": timedelta(hours=2)}
+_STEP = {
+    "5min": timedelta(minutes=5),
+    "15min": timedelta(minutes=15),
+    "1h": timedelta(hours=1),
+    "1D": timedelta(days=1),
+    "1W": timedelta(days=7),
+}
+_GRACE = {
+    "5min": timedelta(minutes=15),
+    "15min": timedelta(minutes=30),
+    "1h": timedelta(hours=2),
+    "1W": timedelta(days=8),
+}
 _MESSAGES = {
     "missing_key": "Price history is unavailable until a market-data key is configured.",
     "timeout": "Price history temporarily unavailable.",
@@ -42,6 +54,7 @@ class SeriesResult:
         data_type: str,
         updated_at: datetime | None,
         interval: str,
+        aggregated_from: str | None = None,
     ) -> None:
         self.bars = bars
         self.status = status
@@ -50,6 +63,7 @@ class SeriesResult:
         self.data_type = data_type
         self.updated_at = updated_at
         self.interval = interval
+        self.aggregated_from = aggregated_from
 
 
 def plan_fetch(
@@ -73,6 +87,16 @@ def plan_fetch(
     if not _tail_is_fresh(last, now, interval):
         windows.append((last, end))
     return windows
+
+
+def bar_status(bars: list[PriceBar], interval: str, now: datetime) -> str:
+    """LIVE, DELAYED, EOD, STALE, or UNKNOWN. Stale means a newer bar was expected."""
+    if not bars:
+        return "UNKNOWN"
+    last = bars[-1].timestamp
+    if last.tzinfo is not None and now.tzinfo is not None and not _tail_is_fresh(last, now, interval):
+        return "STALE"
+    return freshness_label(bars, interval)
 
 
 def freshness_label(bars: list[PriceBar], interval: str) -> str:
@@ -196,6 +220,74 @@ class MarketDataService:
             return _result([], "empty", _MESSAGES["empty"], "", "UNKNOWN", None, interval)
         return _ready(visible, interval, currency)
 
+    def chart_series(
+        self,
+        *,
+        instrument_id: str,
+        symbol: str,
+        range_code: str,
+        timeframe: str,
+        currency: str,
+    ) -> SeriesResult:
+        """Bars for one holding chart. Resample a stored lower timeframe before calling the provider."""
+        interval = timeframe_interval(timeframe)
+        start, end = history_window(range_code, timeframe, self.now)
+        try:
+            cached = self.cache.load(instrument_id, interval, start, end)
+        except Exception:
+            return _unavailable(interval)
+        if not plan_fetch(cached, start=start, end=end, now=self.now, interval=interval):
+            return self._visible(cached, start, end, interval, currency, aggregated_from=None)
+        lower = resample_source(interval)
+        if lower:
+            try:
+                source_bars = self.cache.load(instrument_id, lower, start, end)
+            except Exception:
+                source_bars = []
+            resampled = resample_bars(source_bars, interval)
+            if resampled and not plan_fetch(resampled, start=start, end=end, now=self.now, interval=interval):
+                return self._visible(resampled, start, end, interval, currency, aggregated_from=lower)
+        if plan_fetch(cached, start=start, end=end, now=self.now, interval=interval) and self.provider is None:
+            if cached:
+                return self._visible(cached, start, end, interval, currency, aggregated_from=None)
+            return _result([], "missing_key", _MESSAGES["missing_key"], "", "UNKNOWN", None, interval)
+        if self.provider is not None:
+            try:
+                fetched: list[PriceBar] = []
+                for window_start, window_end in plan_fetch(cached, start=start, end=end, now=self.now, interval=interval):
+                    fetched.extend(self.provider.fetch(symbol, interval, window_start, window_end))
+                stamped = [_stamp_bar(bar, instrument_id, currency) for bar in fetched]
+                if stamped:
+                    self.cache.save(stamped)
+                    cached = list(upsert_bars({bar_identity(bar): bar for bar in cached}, stamped).values())
+            except MarketDataError as exc:
+                if cached:
+                    return self._visible(cached, start, end, interval, currency, aggregated_from=None)
+                return _result([], exc.kind, _MESSAGES.get(exc.kind, _MESSAGES["unavailable"]), "", "UNKNOWN", None, interval)
+            except Exception:
+                if cached:
+                    return self._visible(cached, start, end, interval, currency, aggregated_from=None)
+                return _unavailable(interval)
+        return self._visible(cached, start, end, interval, currency, aggregated_from=None)
+
+    def _visible(
+        self,
+        cached: list[PriceBar],
+        start: datetime,
+        end: datetime,
+        interval: str,
+        currency: str,
+        *,
+        aggregated_from: str | None,
+    ) -> SeriesResult:
+        visible = [bar for bar in cached if start <= bar.timestamp <= end and bar.interval == interval]
+        visible.sort(key=lambda bar: bar.timestamp)
+        if not visible:
+            return _result([], "empty", _MESSAGES["empty"], "", "UNKNOWN", None, interval)
+        ready = _ready(visible, interval, currency)
+        ready.aggregated_from = aggregated_from
+        return ready
+
 
 def build_market_data_service(session: Session, origin: DataOrigin, *, now: datetime | None = None) -> MarketDataService:
     settings = get_settings()
@@ -292,6 +384,8 @@ def _tail_is_fresh(last: datetime, now: datetime, interval: str) -> bool:
     expected = _expected_daily_session(now_utc)
     if interval == "1D":
         return last_utc.date() >= expected
+    if interval == "1W":
+        return now_utc - last_utc <= _GRACE["1W"]
     if now_utc - last_utc <= _GRACE[interval]:
         return True
     return (not _cash_session_open(now_utc)) and last_utc.date() >= expected

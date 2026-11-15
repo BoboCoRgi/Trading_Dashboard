@@ -248,8 +248,31 @@ def opportunity_card(row: dict) -> None:
     )
 
 
-def attention_block(view: dict) -> None:
-    section_header("Attention")
+def attention_block(view: dict, setups: list[dict] | None = None) -> None:
+    section_header(
+        "Attention",
+        "Technical setups are rule observations. They are not instructions to trade." if setups else "",
+    )
+    for setup in setups or []:
+        tone = "info" if setup.get("status") == "CONFIRMED" else "watch"
+        risk_callout(
+            setup.get("status") or "",
+            f"{setup.get('symbol')} · {setup.get('label')}",
+            f"{setup.get('timeframe')} · {setup.get('evidence')}",
+            tone,
+        )
+        page = st.session_state.get("holding_page")
+        if page and setup.get("instrument_id"):
+            st.page_link(
+                page,
+                label=f"Open {setup.get('symbol')} {setup.get('timeframe')}",
+                query_params={
+                    "instrument": setup["instrument_id"],
+                    "timeframe": setup.get("timeframe") or "1D",
+                    "level": setup.get("level") or "",
+                    "setup": setup.get("id") or "",
+                },
+            )
     for item in attention_items(view):
         risk_callout(item["level"], item["title"], item["detail"], item["tone"])
 

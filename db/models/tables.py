@@ -665,3 +665,162 @@ Index(
 )
 Index("ix_trade_executed_at", Trade.executed_at)
 Index("ix_decision_created_at", Decision.created_at)
+
+
+class TechnicalSetup(Base):
+    """A rule observation on completed candles. It is not an order or a recommendation."""
+
+    __tablename__ = "technical_setup"
+    __table_args__ = (
+        Index(
+            "uq_technical_setup_active",
+            "instrument_id",
+            "timeframe",
+            "structure_key",
+            "data_origin",
+            unique=True,
+            postgresql_where=text("status <> 'INVALIDATED'"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instrument.id"))
+    symbol: Mapped[str] = mapped_column(String(32))
+    timeframe: Mapped[str] = mapped_column(String(8))
+    setup_type: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16))
+    detected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    candle_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    level_low: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    level_high: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    close_price: Mapped[Decimal] = mapped_column(MONEY)
+    rvol: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    ema20: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    evidence: Mapped[str] = mapped_column(Text)
+    invalidation: Mapped[str] = mapped_column(Text)
+    structure_key: Mapped[str] = mapped_column(String(64))
+    data_status: Mapped[str] = mapped_column(String(16))
+    current: Mapped[bool] = mapped_column(Boolean, default=True)
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    data_origin: Mapped[DataOrigin] = mapped_column(_enum(DataOrigin, "data_origin_setup"))
+
+
+class TradePlan(Base):
+    """A manual risk plan. Saving it does not send an order."""
+
+    __tablename__ = "trade_plan"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instrument.id"))
+    symbol: Mapped[str] = mapped_column(String(32))
+    strategy: Mapped[str] = mapped_column(String(64))
+    timeframe: Mapped[str] = mapped_column(String(8))
+    direction: Mapped[str] = mapped_column(String(8))
+    entry_price: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    entry_low: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    entry_high: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    stop_loss: Mapped[Decimal] = mapped_column(MONEY)
+    take_profit: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    risk_amount: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    risk_fraction: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    capital_amount: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    capital_currency: Mapped[str] = mapped_column(String(8), default="USD")
+    shares: Mapped[Decimal] = mapped_column(MONEY)
+    risk_reward: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    potential_profit: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    potential_loss: Mapped[Decimal] = mapped_column(MONEY)
+    required_capital: Mapped[Decimal] = mapped_column(MONEY)
+    status: Mapped[str] = mapped_column(String(16))
+    setup_id: Mapped[UUID | None] = mapped_column(ForeignKey("technical_setup.id"), nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    data_origin: Mapped[DataOrigin] = mapped_column(_enum(DataOrigin, "data_origin_plan"))
+
+
+class TradePlanRevision(Base):
+    """The plan as it stood before an edit. The current row is the latest version."""
+
+    __tablename__ = "trade_plan_revision"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    plan_id: Mapped[UUID] = mapped_column(ForeignKey("trade_plan.id"))
+    changed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    snapshot: Mapped[dict] = mapped_column(JSONB)
+    data_origin: Mapped[DataOrigin] = mapped_column(_enum(DataOrigin, "data_origin_plan_revision"))
+
+
+class PlanFill(Base):
+    """One execution leg. Broker rows copy a stored fill. Manual rows are labelled."""
+
+    __tablename__ = "plan_fill"
+    __table_args__ = (
+        Index(
+            "uq_plan_fill_trade",
+            "trade_id",
+            unique=True,
+            postgresql_where=text("trade_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_plan_fill_execution",
+            "broker_execution_id",
+            unique=True,
+            postgresql_where=text("broker_execution_id IS NOT NULL AND broker_execution_id <> ''"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    plan_id: Mapped[UUID] = mapped_column(ForeignKey("trade_plan.id"))
+    trade_id: Mapped[UUID | None] = mapped_column(ForeignKey("trade.id"), nullable=True)
+    source: Mapped[str] = mapped_column(String(16))
+    broker: Mapped[str] = mapped_column(String(32), default="")
+    broker_execution_id: Mapped[str] = mapped_column(String(128), default="")
+    action: Mapped[str] = mapped_column(String(8))
+    quantity: Mapped[Decimal] = mapped_column(MONEY)
+    price: Mapped[Decimal] = mapped_column(MONEY)
+    currency: Mapped[str] = mapped_column(String(8))
+    fees_native: Mapped[Decimal] = mapped_column(MONEY, default=Decimal("0"))
+    fx_rate_to_gbp: Mapped[Decimal | None] = mapped_column(MONEY, nullable=True)
+    executed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    notes: Mapped[str] = mapped_column(Text, default="")
+    data_origin: Mapped[DataOrigin] = mapped_column(_enum(DataOrigin, "data_origin_plan_fill"))
+
+
+class PositionAllocation(Base):
+    """Logical split of shares already held. It does not change the broker position."""
+
+    __tablename__ = "position_allocation"
+    __table_args__ = (
+        UniqueConstraint("instrument_id", "data_origin", name="uq_position_allocation_instrument"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    instrument_id: Mapped[UUID] = mapped_column(ForeignKey("instrument.id"))
+    trading_quantity: Mapped[Decimal] = mapped_column(MONEY)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    data_origin: Mapped[DataOrigin] = mapped_column(_enum(DataOrigin, "data_origin_allocation"))
+
+
+class BacktestRun(Base):
+    """A saved simulation. It is not a broker fill and not a trade plan."""
+
+    __tablename__ = "backtest_run"
+
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    instrument_id: Mapped[UUID | None] = mapped_column(ForeignKey("instrument.id"), nullable=True)
+    symbol: Mapped[str] = mapped_column(String(32))
+    strategy: Mapped[str] = mapped_column(String(32))
+    timeframe: Mapped[str] = mapped_column(String(8))
+    strategy_version: Mapped[str] = mapped_column(String(32))
+    params: Mapped[dict] = mapped_column(JSONB)
+    assumptions: Mapped[dict] = mapped_column(JSONB)
+    data_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    data_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    bar_count: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(64), default="")
+    metrics: Mapped[dict] = mapped_column(JSONB)
+    trades: Mapped[list] = mapped_column(JSONB)
+    comparison: Mapped[dict] = mapped_column(JSONB)
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    data_origin: Mapped[DataOrigin] = mapped_column(_enum(DataOrigin, "data_origin_backtest"))

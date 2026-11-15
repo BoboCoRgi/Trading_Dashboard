@@ -30,14 +30,16 @@ def trade_marker(
     quantity: Decimal,
     price: Decimal,
     currency: str,
+    broker: str = "",
 ) -> TimelineMarker:
     buy = action == "BUY"
+    label = "Buy" if buy else "Sell"
     return TimelineMarker(
         instrument_id=instrument_id,
         timestamp=timestamp,
         event_type="TRADE_BUY" if buy else "TRADE_SELL",
-        title="Buy" if buy else "Sell",
-        description=f"Quantity {quantity} at {price} {currency}".strip(),
+        title=f"{label} · {broker}" if broker else label,
+        description=f"{broker + ' · ' if broker else ''}Quantity {quantity} at {price} {currency}".strip(),
         price=price,
         source="trade",
         source_id=trade_id,

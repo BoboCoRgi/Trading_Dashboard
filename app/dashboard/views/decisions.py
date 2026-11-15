@@ -27,6 +27,7 @@ from services.portfolio_source import portfolio_provider
 from services.queries import decision_detail, decision_list, form_choices
 from services.research import fallback_source
 from services.triggers import TriggerDispatcher
+from app.dashboard.views.trade_desk import render_short_term
 
 _ROLES = ["ANALYST", "SKEPTIC", "RISK_OFFICER", "SYNTHESIS"]
 
@@ -133,6 +134,7 @@ def render() -> None:
         st.error(database_unavailable_message(get_settings().data_mode))
         return
     page_header("Decisions", "What changed, and what happened afterwards.", source=source)
+    render_short_term()
 
     detail = None
     if rows:

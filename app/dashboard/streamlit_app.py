@@ -75,12 +75,14 @@ st.html(
     unsafe_allow_javascript=True,
 )
 holding = st.Page(render_holding, title="Holding", url_path="holding", visibility="hidden")
+decisions = st.Page(render_decisions, title="Decisions", url_path="decisions")
 st.session_state["holding_page"] = holding
+st.session_state["decisions_page"] = decisions
 navigation = st.navigation(
     [
         st.Page(render_today, title="Today", url_path="today", default=True),
         st.Page(render_holdings, title="Holdings", url_path="holdings"),
-        st.Page(render_decisions, title="Decisions", url_path="decisions"),
+        decisions,
         st.Page(render_risk, title="Risk lab", url_path="risk"),
         st.Page(render_research, title="Research lab", url_path="research"),
         st.Page(render_ai, title="AI review", url_path="ai"),
